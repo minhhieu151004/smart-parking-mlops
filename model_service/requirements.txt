@@ -1,0 +1,9 @@
+flask
+boto3
+pandas
+numpy
+tensorflow-cpu
+joblib
+scikit-learn
+gunicorn
+prometheus-flask-exporter
