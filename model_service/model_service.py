@@ -10,7 +10,6 @@ from datetime import timedelta
 import os
 import tempfile
 from prometheus_flask_exporter import PrometheusMetrics
-import time  # Thêm import time
 
 app = Flask(__name__)
 metrics = PrometheusMetrics(app)
@@ -78,8 +77,8 @@ def preprocess_for_prediction(df, n_steps=288):
     return sequence.reshape(1, n_steps, 2)
 
 @app.route('/trigger_predict', methods=['POST'])
+@prediction_latency.time()
 def trigger_predict():
-    start_time = time.time()  # Ghi lại thời gian bắt đầu
     try:
         obj = s3_client.get_object(Bucket=S3_BUCKET, Key=DATA_KEY)
         df_history = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
@@ -91,14 +90,12 @@ def trigger_predict():
         pred_timestamp = pd.to_datetime(df_history['timestamp'].max(), dayfirst=True) + timedelta(hours=1)
         logger.info(f"Predicted car_count for {pred_timestamp}: {prediction}")
         # Ghi lại độ trễ vào histogram
-        prediction_latency.observe(time.time() - start_time)
         return jsonify({
             "predicted_car_count": prediction,
             "for_timestamp": pred_timestamp.strftime('%d/%m/%Y %H:%M:%S')
         })
     except Exception as e:
         logger.error(f"Error during prediction: {e}")
-        prediction_latency.observe(time.time() - start_time)  # Ghi lại độ trễ ngay cả khi có lỗi
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
