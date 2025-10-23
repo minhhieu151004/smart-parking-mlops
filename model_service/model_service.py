@@ -34,7 +34,7 @@ s3_client = boto3.client(
     's3',
     endpoint_url=S3_ENDPOINT,
     aws_access_key_id=S3_ACCESS_KEY,
-    aws_access_key_secret=S3_SECRET_KEY
+    aws_secret_access_key=S3_SECRET_KEY
 )
 
 # --- Hàm tải artifact từ MinIO ---
