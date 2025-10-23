@@ -7,11 +7,11 @@ RUN pip install --no-cache-dir --upgrade pip
 WORKDIR /app
 
 # Sao chép file requirements trước để tận dụng Docker cache
-COPY requirements.txt .
+COPY model_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Sao chép mã nguồn của service
-COPY model_service.py .
+COPY model_service/model_service.py .
 
 # Mở port 5000
 EXPOSE 5000
