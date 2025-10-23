@@ -1,3 +1,5 @@
+# [NỘI DUNG FILE ĐÃ SỬA] smart-parking-mlops/model_service/model_service.py
+
 from flask import Flask, request, jsonify
 import boto3
 import pandas as pd
@@ -12,14 +14,10 @@ import tempfile
 from prometheus_flask_exporter import PrometheusMetrics
 
 app = Flask(__name__)
-# Khởi tạo Prometheus metrics cho app, tự động tạo endpoint /metrics
 metrics = PrometheusMetrics(app)
-
-# Custom metrics để giám sát
 prediction_gauge = metrics.info('parking_prediction_value', 'Giá trị dự đoán số lượng xe')
 prediction_latency = metrics.histogram('parking_prediction_latency_seconds', 'Độ trễ của API dự đoán')
 
-# Cấu hình logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -28,11 +26,16 @@ S3_ENDPOINT = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
 S3_ACCESS_KEY = os.getenv('MINIO_ACCESS_KEY', 'admin')
 S3_SECRET_KEY = os.getenv('MINIO_SECRET_KEY', 'password')
 S3_BUCKET = os.getenv('S3_BUCKET', 'my-bucket')
-
 DATA_KEY = 'parking_data/parking_data.csv'
-MODEL_KEY = 'models/best_cnn_lstm_model.keras'
-SCALER_CAR_KEY = 'models/scaler_car_count.pkl'
-SCALER_HOUR_KEY = 'models/scaler_hour.pkl'
+
+# --- (Mục 2) CẢI TIẾN: Trỏ đến thư mục 'production' ---
+# Service này KHÔNG cần biết về phiên bản.
+# Nó chỉ tải bất cứ thứ gì được "thúc đẩy" vào thư mục 'production'.
+PRODUCTION_MODEL_PATH = 'models/production'
+MODEL_KEY = f'{PRODUCTION_MODEL_PATH}/best_cnn_lstm_model.keras'
+SCALER_CAR_KEY = f'{PRODUCTION_MODEL_PATH}/scaler_car_count.pkl'
+SCALER_HOUR_KEY = f'{PRODUCTION_MODEL_PATH}/scaler_hour.pkl'
+# ----------------------------------------------------
 
 s3_client = boto3.client(
     's3',
@@ -41,7 +44,7 @@ s3_client = boto3.client(
     aws_secret_access_key=S3_SECRET_KEY
 )
 
-# --- Hàm tải artifact từ MinIO ---
+# --- Hàm tải artifact từ MinIO (Giữ nguyên) ---
 def load_artifact_from_minio(key, artifact_type):
     try:
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
@@ -51,43 +54,49 @@ def load_artifact_from_minio(key, artifact_type):
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             tmp_file.write(artifact_data)
             tmp_file_path = tmp_file.name
-        
+            
         if artifact_type == 'model':
             artifact = load_model(tmp_file_path, compile=False)
         else:
             artifact = joblib.load(tmp_file_path)
-        
-        os.unlink(tmp_file_path) # Xóa file tạm
+            
+        os.unlink(tmp_file_path)
         logger.info(f"Loaded {artifact_type} from MinIO: s3://{S3_BUCKET}/{key}")
         return artifact
     except Exception as e:
         logger.error(f"Error loading {artifact_type} from MinIO (s3://{S3_BUCKET}/{key}): {e}")
+        # THÊM MỚI: Nếu không tải được model 'production', service không nên chạy
+        logger.critical(f"FATAL: Could not load production {artifact_type}. Exiting.")
         raise
-
+        
 # Tải model và scaler khi ứng dụng khởi động
+logger.info("--- Tải mô hình 'PRODUCTION' khi khởi động ---")
 model = load_artifact_from_minio(MODEL_KEY, 'model')
 scaler_car_count = load_artifact_from_minio(SCALER_CAR_KEY, 'scaler_car')
 scaler_hour = load_artifact_from_minio(SCALER_HOUR_KEY, 'scaler_hour')
+logger.info("--- Tải mô hình 'PRODUCTION' hoàn tất. Service sẵn sàng. ---")
+
+# --- (Các hàm preprocess_for_prediction và trigger_predict giữ nguyên) ---
 
 def preprocess_for_prediction(df, n_steps=288):
     # Tiền xử lý dữ liệu để dự đoán
     df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
     df = df.sort_values('timestamp').set_index('timestamp')
     df_resampled = df.resample('5min').mean().interpolate()
-    
+
     df_resampled['hour'] = df_resampled.index.hour
     df_resampled['car_count_scaled'] = scaler_car_count.transform(df_resampled[['car_count']])
     df_resampled['hour_scaled'] = scaler_hour.transform(df_resampled[['hour']])
     
     sequence = df_resampled[['car_count_scaled', 'hour_scaled']].values[-n_steps:]
-    
+
     if len(sequence) < n_steps:
         raise ValueError(f"Không đủ dữ liệu, cần ít nhất {n_steps} điểm dữ liệu (5-phút).")
-        
+
     return sequence.reshape(1, n_steps, 2)
 
 @app.route('/trigger_predict', methods=['POST'])
-@prediction_latency.time() # Tự động đo độ trễ của endpoint này
+@prediction_latency.time()
 def trigger_predict():
     try:
         # Tải dữ liệu lịch sử từ MinIO
@@ -104,10 +113,10 @@ def trigger_predict():
 
         # Cập nhật metric cho Prometheus
         prediction_gauge.set(prediction)
-
+        
         pred_timestamp = pd.to_datetime(df_history['timestamp'].max(), dayfirst=True) + timedelta(hours=1)
         logger.info(f"Predicted car_count for {pred_timestamp}: {prediction}")
-        
+
         return jsonify({
             "predicted_car_count": prediction,
             "for_timestamp": pred_timestamp.strftime('%d/%m/%Y %H:%M:%S')
