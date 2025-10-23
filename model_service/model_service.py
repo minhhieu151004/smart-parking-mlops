@@ -1,5 +1,3 @@
-# [DÁN TOÀN BỘ CODE NÀY VÀO model_service.py]
-
 from flask import Flask, request, jsonify
 import boto3
 import pandas as pd
@@ -12,16 +10,11 @@ from datetime import timedelta
 import os
 import tempfile
 from prometheus_flask_exporter import PrometheusMetrics
-import time # <-- THÊM LẠI import time
 
 app = Flask(__name__)
 metrics = PrometheusMetrics(app)
-
-# --- ĐẢM BẢO CÁC DÒNG NÀY LÀ CHÍNH XÁC ---
 prediction_gauge = metrics.info('parking_prediction_value', 'Giá trị dự đoán số lượng xe')
-# DÒNG QUAN TRỌNG NHẤT (với dấu () và tham số):
 prediction_latency = metrics.histogram('parking_prediction_latency_seconds', 'Độ trễ của API dự đoán')
-# ----------------------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,9 +78,8 @@ def preprocess_for_prediction(df, n_steps=288):
     return sequence.reshape(1, n_steps, 2)
 
 @app.route('/trigger_predict', methods=['POST'])
-# @prediction_latency.time() # <-- Xóa decorator
+@prediction_latency  # Sử dụng decorator để đo độ trễ
 def trigger_predict():
-    start_time = time.time() # <-- BẮT ĐẦU ĐO THỜI GIAN
     try:
         obj = s3_client.get_object(Bucket=S3_BUCKET, Key=DATA_KEY)
         df_history = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
@@ -98,20 +90,12 @@ def trigger_predict():
         prediction_gauge.set(prediction)
         pred_timestamp = pd.to_datetime(df_history['timestamp'].max(), dayfirst=True) + timedelta(hours=1)
         logger.info(f"Predicted car_count for {pred_timestamp}: {prediction}")
-        
-        # GHI LẠI ĐỘ TRỄ KHI THÀNH CÔNG
-        prediction_latency.observe(time.time() - start_time) 
-        
         return jsonify({
             "predicted_car_count": prediction,
             "for_timestamp": pred_timestamp.strftime('%d/%m/%Y %H:%M:%S')
         })
     except Exception as e:
         logger.error(f"Error during prediction: {e}")
-        
-        # GHI LẠI ĐỘ TRỄ KHI THẤT BẠI
-        prediction_latency.observe(time.time() - start_time) 
-        
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
