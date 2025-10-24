@@ -10,7 +10,7 @@ from airflow.operators.python import BranchPythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.providers.docker.operators.docker import DockerOperator
-from airflow.providers.http.operators.http import SimpleHttpOperator
+from airflow.providers.http.operators.http import HttpOperator
 from docker.types import Mount
 
 # --- Các biến cấu hình ---
@@ -180,7 +180,7 @@ with DAG(
 
     # THAY THẾ JENKINS BẰNG GITHUB ACTIONS
     # Task này gọi API của GitHub để trigger workflow 'mlops-jobs.yml'
-    trigger_retraining_job = SimpleHttpOperator(
+    trigger_retraining_job = HttpOperator(
         task_id='trigger_retraining_job',
         http_conn_id='github_api', # Đảm bảo bạn đã tạo Connection 'github_api' trong Airflow
         endpoint=f'/repos/{GITHUB_REPO}/dispatches',
@@ -201,7 +201,7 @@ with DAG(
     )
 
     # THAY THẾ JENKINS BẰNG GITHUB ACTIONS
-    trigger_service_restart_job = SimpleHttpOperator(
+    trigger_service_restart_job = HttpOperator(
         task_id='trigger_service_restart_job',
         http_conn_id='github_api', # Sử dụng cùng connection
         endpoint=f'/repos/{GITHUB_REPO}/dispatches',
