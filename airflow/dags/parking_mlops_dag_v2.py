@@ -162,7 +162,7 @@ with DAG(
         ],
         environment=DOCKER_ENV_VARS,
         network_mode=DOCKER_NETWORK,
-        auto_remove=True,
+        auto_remove='success',
         do_xcom_push=True,
         docker_url="unix://var/run/docker.sock",
         mount_tmp_dir=False,
