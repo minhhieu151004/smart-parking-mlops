@@ -1,0 +1,55 @@
+# CD mô hình 
+
+name: MLOps - Retrain or Restart
+
+on:
+  repository_dispatch:
+    types: [ trigger-retrain, trigger-restart ] # Hai loại sự kiện
+
+jobs:
+  # Job 1: Huấn luyện lại mô hình
+  retrain:
+    name: Retrain Model
+    if: github.event.action == 'trigger-retrain' # Chỉ chạy khi Airflow yêu cầu 'trigger-retrain'
+    runs-on: ubuntu-latest
+    
+    env:
+      MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+      MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r model_service/requirements.txt 
+
+      - name: Run training pipeline
+        run: |
+          python mlops/train_pipeline.py --version ${{ github.event.client_payload.model_version }}
+
+  # Job 2: Khởi động lại service
+  restart:
+    name: Restart Model Service
+    if: github.event.action == 'trigger-restart' # Chỉ chạy khi Airflow yêu cầu 'trigger-restart'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Restart service via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_SERVER_HOST }}
+          username: ${{ secrets.DEPLOY_SERVER_USER }}
+          key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          script: |
+            echo "Restarting model-service container..."
+            docker restart model-service
+            echo "Service restarted."

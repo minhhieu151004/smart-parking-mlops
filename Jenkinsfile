@@ -3,15 +3,10 @@
 // Mục đích: Tự động hóa việc build và deploy application service khi có thay đổi về code.
 
 pipeline {
-    // Chỉ định agent (môi trường thực thi) cho pipeline. 'any' nghĩa là Jenkins có thể dùng bất kỳ agent nào có sẵn.
     agent any
 
-    // Định nghĩa các biến môi trường sẽ được sử dụng trong suốt pipeline.
-    environment {
-        // !!! THAY ĐỔI CÁC GIÁ TRỊ NÀY CHO PHÙ HỢP VỚI HỆ THỐNG CỦA BẠN !!!
-        
-        // Tên image trên Docker Hub: <username>/<repository_name>
-        DOCKER_IMAGE          = "your-dockerhub-username/parking-model-service" 
+    environment {        
+        DOCKER_IMAGE          = "mhiuuu/parking-model-service" 
         
         // ID của credentials Docker Hub bạn đã tạo trong Jenkins
         DOCKER_CREDENTIALS_ID = "dockerhub-credentials" 
@@ -23,15 +18,12 @@ pipeline {
         DEPLOY_SERVER         = "your-server-user@your-server-ip" 
     }
 
-    // 'stages' chứa các giai đoạn (stage) của pipeline. Mỗi stage là một bước logic.
     stages {
         // Giai đoạn 1: Lấy mã nguồn mới nhất từ GitHub
         stage('Checkout Code') {
             steps {
                 echo '--> Bắt đầu lấy mã nguồn từ Git...'
-                // Lệnh 'git' sẽ clone hoặc pull repository được cấu hình trong job Jenkins.
-                // !!! THAY ĐỔI URL NÀY THÀNH URL REPO CỦA BẠN !!!
-                git 'https://github.com/your-username/smart-parking-mlops.git'
+                git branch 'main', url: 'https://github.com/minhhieu151004/smart-parking-mlops.git'
                 echo '--> Lấy mã nguồn thành công.'
             }
         }
@@ -59,8 +51,6 @@ pipeline {
         stage('Push to Docker Registry') {
             steps {
                 echo "--> Đẩy image ${DOCKER_IMAGE}:latest lên Docker Hub..."
-                // 'withCredentials' là một khối an toàn để sử dụng credentials đã lưu trong Jenkins.
-                // Nó sẽ inject username và password vào các biến môi trường DOCKER_USER và DOCKER_PASS.
                 withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     // Đăng nhập vào Docker Hub
                     sh "echo ${DOCKER_PASS} | docker login -u ${DOCKER_USER} --password-stdin"
