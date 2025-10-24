@@ -8,7 +8,7 @@ import logging
 from airflow.models.dag import DAG
 from airflow.operators.python import BranchPythonOperator
 from airflow.operators.bash import BashOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.providers.http.operators.http import SimpleHttpOperator
 from docker.types import Mount
@@ -218,7 +218,7 @@ with DAG(
         bash_command='echo "Mô hình mới không tốt hơn, không thúc đẩy. Dừng luồng."'
     )
 
-    model_promotion_failed = DummyOperator(
+    model_promotion_failed = EmptyOperator(
         task_id='model_promotion_failed',
     )
 
