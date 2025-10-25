@@ -43,9 +43,11 @@ jobs:
       - name: Deploy to VM via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEPLOY_SERVER_HOST }}
+          host: 0.tcp.ap.ngrok.io 
+          port: 15585 
           username: ${{ secrets.DEPLOY_SERVER_USER }}
           key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          debug: true 
           script: |
             echo "1. Đang kéo (pull) image mới nhất từ Docker Hub..."
             docker pull ${{ env.DOCKER_IMAGE }}:latest
