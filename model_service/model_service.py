@@ -10,7 +10,6 @@ from datetime import timedelta
 import os
 import tempfile
 from prometheus_flask_exporter import PrometheusMetrics
-#test cicd aa
 
 app = Flask(__name__)
 metrics = PrometheusMetrics(app)
@@ -20,42 +19,41 @@ prediction_latency = metrics.histogram('parking_prediction_latency_seconds', 'Đ
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Cấu hình kết nối MinIO ---
-S3_ENDPOINT = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
-S3_ACCESS_KEY = os.getenv('MINIO_ACCESS_KEY', 'admin')
-S3_SECRET_KEY = os.getenv('MINIO_SECRET_KEY', 'password')
-S3_BUCKET = os.getenv('S3_BUCKET', 'my-bucket')
+# --- Cấu hình kết nối S3 ---
+# Các biến môi trường này sẽ được cung cấp bởi GitHub Actions hoặc .env (cho Airflow)
+S3_BUCKET = os.getenv('S3_BUCKET', 'kltn-smart-parking-data') 
 DATA_KEY = 'parking_data/parking_data.csv'
 PRODUCTION_MODEL_PATH = 'models/production'
 MODEL_KEY = f'{PRODUCTION_MODEL_PATH}/best_cnn_lstm_model.keras'
 SCALER_CAR_KEY = f'{PRODUCTION_MODEL_PATH}/scaler_car_count.pkl'
 SCALER_HOUR_KEY = f'{PRODUCTION_MODEL_PATH}/scaler_hour.pkl'
 
+# Khởi tạo S3 client.
 s3_client = boto3.client(
-    's3',
-    endpoint_url=S3_ENDPOINT,
-    aws_access_key_id=S3_ACCESS_KEY,
-    aws_secret_access_key=S3_SECRET_KEY
+    's3'
 )
 
-# --- Hàm tải artifact từ MinIO ---
+# --- Hàm tải artifact từ S3 ---
 def load_artifact_from_minio(key, artifact_type):
     try:
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
         artifact_data = response['Body'].read()
         suffix = '.keras' if artifact_type == 'model' else '.pkl'
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             tmp_file.write(artifact_data)
             tmp_file_path = tmp_file.name
+            
         if artifact_type == 'model':
             artifact = load_model(tmp_file_path, compile=False)
         else:
             artifact = joblib.load(tmp_file_path)
+            
         os.unlink(tmp_file_path)
-        logger.info(f"Loaded {artifact_type} from MinIO: s3://{S3_BUCKET}/{key}")
+        logger.info(f"Loaded {artifact_type} from S3: s3://{S3_BUCKET}/{key}") # Sửa log
         return artifact
     except Exception as e:
-        logger.error(f"Error loading {artifact_type} from MinIO (s3://{S3_BUCKET}/{key}): {e}")
+        logger.error(f"Error loading {artifact_type} from S3 (s3://{S3_BUCKET}/{key}): {e}")
         logger.critical(f"FATAL: Could not load production {artifact_type}. Exiting.")
         raise
 
@@ -79,7 +77,7 @@ def preprocess_for_prediction(df, n_steps=288):
     return sequence.reshape(1, n_steps, 2)
 
 @app.route('/trigger_predict', methods=['POST'])
-@prediction_latency  # Sử dụng decorator để đo độ trễ
+@prediction_latency # Sử dụng decorator để đo độ trễ
 def trigger_predict():
     try:
         obj = s3_client.get_object(Bucket=S3_BUCKET, Key=DATA_KEY)
@@ -101,4 +99,3 @@ def trigger_predict():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-

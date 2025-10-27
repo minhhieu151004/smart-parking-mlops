@@ -43,9 +43,10 @@ jobs:
       - name: Deploy to VM via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: 0.tcp.ap.ngrok.io 
-          port: 15585 
+          host: ${{ secrets.DEPLOY_SERVER_HOST }}
+
           username: ${{ secrets.DEPLOY_SERVER_USER }}
+          
           key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           debug: true 
           script: |
@@ -56,12 +57,11 @@ jobs:
             docker stop model-service || true
             docker rm model-service || true
             
-            echo "3. Đang khởi động container mới..."
+            echo "3. Đang khởi động container mới (Phiên bản S3/IAM Role)..."
+            
+            # SỬA 3: Xóa các biến MinIO, chỉ giữ lại S3_BUCKET
             docker run -d -p 5000:5000 --name model-service --network my-network \
-            -e MINIO_ENDPOINT=http://minio:9000 \
-            -e MINIO_ACCESS_KEY=admin \
-            -e MINIO_SECRET_KEY=password \
-            -e S3_BUCKET=my-bucket \
+            -e S3_BUCKET=${{ secrets.S3_BUCKET }} \
             ${{ env.DOCKER_IMAGE }}:latest
             
             echo "4. Deploy hoàn tất!"
