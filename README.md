@@ -12,7 +12,7 @@
 * **Model Service: Amazon EC2** 
    * **Chạy một container Docker chứa API dự đoán (Flask + Gunicorn).**
    * **Sử dụng IAM Role (ec2-s3-access-role) để tự động truy cập S3 và CloudWatch.**
-* ***CI/CD - Ứng dụng (Luồng 1): GitHub Actions (cicd.yml)**
+* **CI/CD - Ứng dụng (Luồng 1): GitHub Actions (cicd.yml)**
    * **Tự động build và push Docker image (model-service) lên Docker Hub khi có git push vào thư mục model\_service/.**
    * **Tự động SSH vào EC2 và triển khai container model-service mới nhất.**
 * **Workflow Orchestration - MLOps (Luồng 2):**
