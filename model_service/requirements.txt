@@ -1,9 +1,8 @@
-flask>=2.0.0 
-boto3>=1.24.0 
-pandas>=1.5.0 
-tensorflow>=2.10.0 
-numpy>=1.22.0 
-joblib>=1.2.0 
-prometheus_flask_exporter>=0.20.0 
-gunicorn>=20.1.0 
+flask>=2.0.0
+boto3>=1.24.0
+pandas>=1.5.0
+tensorflow-cpu>=2.10.0
+numpy>=1.22.0
+joblib>=1.2.0
+gunicorn>=20.1.0
 scikit-learn>=1.7.2

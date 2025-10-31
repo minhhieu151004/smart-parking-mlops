@@ -44,16 +44,18 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_SERVER_HOST }}
-
+                    
           username: ${{ secrets.DEPLOY_SERVER_USER }}
           
           key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          
           debug: true 
+          
           script: |
             echo "1. Đang kéo (pull) image mới nhất từ Docker Hub..."
             docker pull ${{ env.DOCKER_IMAGE }}:latest
             
-            echo "2. Đang dừng và xóa container cũ (nếu có)..."
+            echo "2. Đang dừng và xóa container cũ..."
             docker stop model-service || true
             docker rm model-service || true
             
@@ -65,3 +67,4 @@ jobs:
             ${{ env.DOCKER_IMAGE }}:latest
             
             echo "4. Deploy hoàn tất!"
+
