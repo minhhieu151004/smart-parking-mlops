@@ -1,7 +1,7 @@
 import sagemaker
 import boto3
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep, ConditionStep
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep, ConditionStep, ModelStep
 from sagemaker.processing import Processor, ProcessingInput, ProcessingOutput
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.estimator import Estimator
@@ -11,6 +11,9 @@ from sagemaker.workflow.condition_step import JsonGet
 from sagemaker.workflow.parameters import ParameterString, ParameterInteger
 from sagemaker.tensorflow import TensorFlow
 from sagemaker.workflow.properties import PropertyFile
+from sagemaker.model import Model
+from sagemaker.tensorflow.model import TensorFlowModel 
+from sagemaker.workflow.model_step import ModelStep 
 
 # --- Cấu hình ---
 pipeline_name = "SmartParkingMLOpsPipeline"
@@ -19,7 +22,13 @@ sagemaker_session = sagemaker.Session()
 default_s3_bucket = "kltn-smart-parking-data" 
 role = sagemaker.get_execution_role() 
 
-# --- Định nghĩa các tham số đầu vào cho Pipeline ---
+# Tên cho Model Registry Group
+model_package_group_name = ParameterString(
+    name="ModelPackageGroupName",
+    default_value="SmartParkingModelGroup" 
+)
+
+# --- (Các tham số) ---
 baseline_data_uri = ParameterString(
     name="BaselineDataUrl",
     default_value=f"s3://{default_s3_bucket}/parking_data/parking_data.csv"
@@ -36,13 +45,8 @@ prediction_data_prefix = ParameterString(
     name="PredictionDataPrefix",
     default_value="daily_predictions/" 
 )
-
-# (SỬA) Ngưỡng P-value cho Data Drift
 p_value_drift_threshold = ParameterString(name="PValueDriftThreshold", default_value="0.05")
-# Ngưỡng MAE cho Model Drift
 model_mae_drift_threshold = ParameterString(name="ModelMaeDriftThreshold", default_value="10.0")
-
-# (Các tham số khác giữ nguyên)
 model_version = ParameterString(
     name="ModelVersion",
     default_value=sagemaker.workflow.utilities.ExecuteVariable()
@@ -51,9 +55,8 @@ training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.m5.large")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 
-# --- Bước 1: Kiểm tra Data Drift (Processing Step) ---
+# --- (Bước 1: step_check_drift) ---
 drift_output_s3_uri = f"s3://{default_s3_bucket}/pipeline-outputs/drift-check/{model_version}"
-
 sklearn_processor_drift = SKLearnProcessor(
     framework_version="1.2", 
     role=role,
@@ -62,42 +65,34 @@ sklearn_processor_drift = SKLearnProcessor(
     base_job_name="drift-check-job",
     sagemaker_session=sagemaker_session,
 )
-
 drift_property_file = PropertyFile(
     name="DriftCheckResult",
     output_name="drift_result",
     path="drift_check_result.json"
 )
-
 step_check_drift = ProcessingStep(
     name="CheckDataDrift",
     processor=sklearn_processor_drift,
-    inputs=[
-        ProcessingInput(source=baseline_data_uri, destination="/opt/ml/processing/input_baseline")
-    ],
+    inputs=[ProcessingInput(source=baseline_data_uri, destination="/opt/ml/processing/input_baseline")],
     outputs=[
         ProcessingOutput(output_name="drift_result", source="/opt/ml/processing/output",
                          destination=drift_output_s3_uri)
     ],
     code="drift_detector.py", 
-    
-    # (CẬP NHẬT) Sửa tham số (thay data-mae-threshold bằng p-value-threshold)
     job_arguments=[
         "--baseline-data-uri", baseline_data_uri,
         "--data-bucket", daily_data_bucket,
         "--actual-prefix", actual_data_prefix,
         "--prediction-prefix", prediction_data_prefix,
         "--output-path", "/opt/ml/processing/output",
-        "--p-value-threshold", p_value_drift_threshold, # <-- Đã sửa
+        "--p-value-threshold", p_value_drift_threshold,
         "--model-mae-threshold", model_mae_drift_threshold
     ],
     property_files=[drift_property_file]
 )
 
-# --- (MỚI) Bước 3: Tổng hợp Dữ liệu (Consolidate Data) ---
-# (Giữ nguyên như file build_pipeline.py trước)
+# --- (Bước 3: step_consolidate_data) ---
 consolidated_output_s3_uri = f"s3://{default_s3_bucket}/parking_data/" 
-
 sklearn_processor_consolidate = SKLearnProcessor(
     framework_version="1.2", 
     role=role,
@@ -106,16 +101,13 @@ sklearn_processor_consolidate = SKLearnProcessor(
     base_job_name="consolidate-data-job",
     sagemaker_session=sagemaker_session,
 )
-
 step_consolidate_data = ProcessingStep(
     name="ConsolidateData",
     processor=sklearn_processor_consolidate,
-    inputs=[
-         ProcessingInput(source=baseline_data_uri, destination="/opt/ml/processing/input_baseline")
-    ],
+    inputs=[ProcessingInput(source=baseline_data_uri, destination="/opt/ml/processing/input_baseline")],
     outputs=[
         ProcessingOutput(output_name="new_baseline_data", source="/opt/ml/processing/output",
-                         destination=consolidated_output_s3_uri) 
+                         destination=consolidated_output_s3_uri)
     ],
     code="consolidate_data.py", 
     job_arguments=[
@@ -126,10 +118,8 @@ step_consolidate_data = ProcessingStep(
     ]
 )
 
-# --- (MỚI) Bước 4: Huấn luyện Mô hình (Training Step) ---
-# (Giữ nguyên như file build_pipeline.py trước)
+# --- (Bước 4: step_train_model) ---
 model_output_s3_uri = f"s3://{default_s3_bucket}/pipeline-outputs/training-output/{model_version}"
-
 tf_estimator = TensorFlow(
     entry_point="train_pipeline.py", 
     source_dir=".", 
@@ -151,7 +141,6 @@ tf_estimator = TensorFlow(
     ],
     environment={"SM_OUTPUT_DATA_DIR": "/opt/ml/output/data"}
 )
-
 step_train_model = TrainingStep(
     name="TrainParkingModel",
     estimator=tf_estimator,
@@ -165,7 +154,42 @@ step_train_model = TrainingStep(
     }
 )
 
-# --- Bước 2: Điều kiện (Condition Step) ---
+# --- Bước 5: Đăng ký Mô hình (Register Model) ---
+# Bước này lấy model.tar.gz từ step_train_model và đăng ký vào Registry
+# với trạng thái 'Pending' (Chờ duyệt).
+
+# Tạo một đối tượng Model (chỉ định framework)
+model = TensorFlowModel(
+    model_data=step_train_model.properties.ModelArtifacts.S3ModelArtifacts,
+    role=role,
+    framework_version="2.15",
+    sagemaker_session=sagemaker_session,
+)
+
+# Lấy metrics từ job huấn luyện để đăng ký
+model_metrics = {
+    "ModelQuality": {
+        "Statistics": {
+            "ContentType": "application/json",
+            "S3Uri": f"{model_output_s3_uri}/{step_train_model.name}/output/data/metrics.json",
+        }
+    }
+}
+
+step_register_model = ModelStep(
+   name="RegisterModel",
+   step_args=model.register(
+       content_types=["text/csv"],
+       response_types=["text/csv"],
+       inference_instances=["ml.m5.large"], 
+       transform_instances=["ml.m5.large"],
+       model_package_group_name=model_package_group_name,
+       approval_status="Pending",
+       model_metrics=model_metrics 
+   )
+)
+
+# --- (Bước 2: Condition) ---
 condition_drift_detected = ConditionEquals(
     left=JsonGet(
         step_name=step_check_drift.name,
@@ -178,7 +202,8 @@ condition_drift_detected = ConditionEquals(
 step_conditional_retrain_flow = ConditionStep(
     name="DriftCheckCondition",
     conditions=[condition_drift_detected],
-    if_steps=[step_consolidate_data, step_train_model], 
+    # Thêm step_register_model vào chuỗi if_steps
+    if_steps=[step_consolidate_data, step_train_model, step_register_model], 
     else_steps=[], 
 )
 
@@ -190,12 +215,13 @@ pipeline = Pipeline(
         daily_data_bucket,
         actual_data_prefix,
         prediction_data_prefix,
-        p_value_drift_threshold,
         model_mae_drift_threshold,
         model_version,
+        p_value_drift_threshold,
         training_epochs,
         processing_instance_type,
         training_instance_type,
+        model_package_group_name, 
     ],
     steps=[step_check_drift, step_conditional_retrain_flow],
     sagemaker_session=sagemaker_session,
