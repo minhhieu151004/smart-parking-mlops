@@ -1,0 +1,113 @@
+# .github/workflows/deploy-lambda.yml
+#
+# Workflow CI/CD MỚI: Tự động đóng gói và deploy
+# cả hai hàm Lambda lên AWS khi có push code vào thư mục 'lambda/'.
+
+name: CI/CD - Deploy Lambda Functions
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'lambda/**'
+
+jobs:
+  # === JOB 1: Deploy Hàm Evaluate/Promote ===
+  deploy-evaluate-lambda:
+    name: Deploy Evaluate-Promote Lambda
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' 
+
+      - name: Configure AWS Credentials
+        # Sử dụng IAM User (với quyền deploy Lambda)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }} # <-- BẠN CẦN THÊM SECRET NÀY
+
+      - name: Build and Package Lambda (Evaluate)
+        run: |
+          echo "Bắt đầu đóng gói hàm evaluate-promote-trigger..."
+          # 1. Tạo thư mục package
+          mkdir package
+          
+          # 2. Cài đặt thư viện 'requests' từ requirements.txt vào thư mục 'package'
+          pip install \
+            -r lambda/evaluate-promote-trigger/requirements.txt \
+            -t ./package
+          
+          # 3. Copy code Python vào thư mục 'package'
+          cp lambda/evaluate-promote-trigger/lambda_function.py ./package/
+          
+          # 4. Nén (zip) toàn bộ nội dung của thư mục 'package'
+          cd package
+          zip -r ../lambda-eval-deploy.zip .
+          cd ..
+          echo "Đóng gói lambda-eval-deploy.zip hoàn tất."
+
+      - name: Deploy to AWS Lambda (Evaluate)
+        run: |
+          aws lambda update-function-code \
+            --function-name evaluate-promote-trigger \
+            --zip-file fileb://lambda-eval-deploy.zip
+
+  # === JOB 2: Deploy Hàm Run Prediction ===
+  deploy-prediction-lambda:
+    name: Deploy Run-Prediction Lambda
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build and Package Lambda (Prediction)
+        run: |
+          echo "Bắt đầu đóng gói hàm run-prediction-trigger..."
+          mkdir package
+          
+          # Kiểm tra xem file requirements có tồn tại không
+          if [ -f lambda/run-prediction-trigger/requirements.txt ]; then
+            echo "Tìm thấy requirements.txt, đang cài đặt..."
+            pip install \
+              -r lambda/run-prediction-trigger/requirements.txt \
+              -t ./package
+          else
+            echo "Không tìm thấy requirements.txt, bỏ qua pip install."
+          fi
+          
+          # Copy code Python
+          cp lambda/run-prediction-trigger/lambda_function.py ./package/
+          
+          # Nén
+          cd package
+          zip -r ../lambda-pred-deploy.zip .
+          cd ..
+          echo "Đóng gói lambda-pred-deploy.zip hoàn tất."
+
+      - name: Deploy to AWS Lambda (Prediction)
+        run: |
+          aws lambda update-function-code \
+            --function-name run-prediction-trigger \
+            --zip-file fileb://lambda-pred-deploy.zip
+

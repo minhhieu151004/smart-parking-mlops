@@ -2,64 +2,60 @@ import sagemaker
 import boto3
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep, ConditionStep
-from sagemaker.processing import ProcessingInput, ProcessingOutput
-from sagemaker.sklearn.processing import SKLearnProcessor 
+from sagemaker.processing import Processor, ProcessingInput, ProcessingOutput
+from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.conditions import ConditionEquals
 from sagemaker.workflow.condition_step import JsonGet
 from sagemaker.workflow.parameters import ParameterString, ParameterInteger
-from sagemaker.tensorflow import TensorFlow 
-from sagemaker.workflow.utilities import ExecuteVariable
+from sagemaker.tensorflow import TensorFlow
+from sagemaker.workflow.properties import PropertyFile
 
 # --- Cấu hình ---
-S3_BUCKET = "kltn-smart-parking-data" 
-PIPELINE_NAME = "SmartParking-MLOps-Pipeline-v1"
-
-# Lấy thông tin AWS
+pipeline_name = "SmartParkingMLOpsPipeline"
+aws_region = boto3.Session().region_name
 sagemaker_session = sagemaker.Session()
-aws_region = sagemaker_session.boto_region_name
-# Lấy IAM Role. Bạn PHẢI có một IAM Role cho SageMaker
-# Cách 1: Tự động lấy Role (nếu bạn chạy script này trên EC2/SageMaker Notebook đã gắn Role)
-try:
-    role = sagemaker.get_execution_role()
-except ValueError:
-    # Cách 2: Chỉ định ARN của Role (nếu chạy từ máy local)
-    # Thay 'YOUR_SAGEMAKER_ROLE_ARN' bằng ARN của Role
-    # role = "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_SAGEMAKER_ROLE"
-    print("Không thể tự động lấy Role. Hãy đảm bảo bạn đã cấu hình Role.")
-    # Tạm thời dùng 1 placeholder, bạn cần sửa lại nếu chạy local
-    role = "arn:aws:iam::123456789012:role/service-role/AmazonSageMaker-ExecutionRole-Default"
+default_s3_bucket = "kltn-smart-parking-data" 
+role = sagemaker.get_execution_role() 
 
-
-# --- Định nghĩa các tham số Pipeline ---
-# Tham số: Đường dẫn S3 đến file dữ liệu đầy đủ
-input_data_uri = ParameterString(
-    name="InputDataUrl",
-    default_value=f"s3://{S3_BUCKET}/parking_data/parking_data.csv"
+# --- Định nghĩa các tham số đầu vào cho Pipeline ---
+baseline_data_uri = ParameterString(
+    name="BaselineDataUrl",
+    default_value=f"s3://{default_s3_bucket}/parking_data/parking_data.csv"
 )
-# Tham số: Phiên bản model 
+daily_data_bucket = ParameterString(
+    name="DailyDataBucket",
+    default_value=default_s3_bucket
+)
+actual_data_prefix = ParameterString(
+    name="ActualDataPrefix",
+    default_value="daily_actuals/" 
+)
+prediction_data_prefix = ParameterString(
+    name="PredictionDataPrefix",
+    default_value="daily_predictions/" 
+)
+
+# (SỬA) Ngưỡng P-value cho Data Drift
+p_value_drift_threshold = ParameterString(name="PValueDriftThreshold", default_value="0.05")
+# Ngưỡng MAE cho Model Drift
+model_mae_drift_threshold = ParameterString(name="ModelMaeDriftThreshold", default_value="10.0")
+
+# (Các tham số khác giữ nguyên)
 model_version = ParameterString(
     name="ModelVersion",
-    default_value=ExecuteVariable() 
+    default_value=sagemaker.workflow.utilities.ExecuteVariable()
 )
-# Tham số: Ngưỡng P-value để phát hiện drift
-p_value_drift_threshold = ParameterString(name="PValueDriftThreshold", default_value="0.05")
-# Tham số: Số Epochs huấn luyện
 training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
-# Tham số: Loại máy chủ (Instance Type)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.m5.large")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 
+# --- Bước 1: Kiểm tra Data Drift (Processing Step) ---
+drift_output_s3_uri = f"s3://{default_s3_bucket}/pipeline-outputs/drift-check/{model_version}"
 
-# --- Định nghĩa Bước 1: Kiểm tra Data Drift (Processing Step) ---
-
-# Nơi lưu output của bước drift check (file JSON)
-drift_output_s3_uri = f"s3://{S3_BUCKET}/pipeline-outputs/drift-check/{model_version}/"
-
-# Định nghĩa Processor (môi trường) để chạy script
-sklearn_processor = SKLearnProcessor(
-    framework_version="1.2-1", # Phiên bản Scikit-learn
+sklearn_processor_drift = SKLearnProcessor(
+    framework_version="1.2", 
     role=role,
     instance_type=processing_instance_type,
     instance_count=1,
@@ -67,128 +63,146 @@ sklearn_processor = SKLearnProcessor(
     sagemaker_session=sagemaker_session,
 )
 
-# Định nghĩa output của bước processing
-drift_check_output = ProcessingOutput(
-    output_name="drift_result", # Tên của output
-    source="/opt/ml/processing/output", # Đường dẫn local trong container
-    destination=drift_output_s3_uri # Đường dẫn S3
+drift_property_file = PropertyFile(
+    name="DriftCheckResult",
+    output_name="drift_result",
+    path="drift_check_result.json"
 )
 
-# Định nghĩa bước Processing
 step_check_drift = ProcessingStep(
     name="CheckDataDrift",
-    processor=sklearn_processor,
+    processor=sklearn_processor_drift,
     inputs=[
-        ProcessingInput(
-            source=input_data_uri, # Lấy dữ liệu từ S3
-            destination="/opt/ml/processing/input_data" # Tải về đường dẫn này
-        )
+        ProcessingInput(source=baseline_data_uri, destination="/opt/ml/processing/input_baseline")
     ],
-    outputs=[drift_check_output],
-    # Script này phải nằm CÙNG THƯ MỤC với build_pipeline.py
+    outputs=[
+        ProcessingOutput(output_name="drift_result", source="/opt/ml/processing/output",
+                         destination=drift_output_s3_uri)
+    ],
     code="drift_detector.py", 
-    # Truyền tham số cho script drift_detector.py
+    
+    # (CẬP NHẬT) Sửa tham số (thay data-mae-threshold bằng p-value-threshold)
     job_arguments=[
-        "--input-data", f"/opt/ml/processing/input_data/{input_data_uri.default_value.split('/')[-1]}", # Đường dẫn file local
+        "--baseline-data-uri", baseline_data_uri,
+        "--data-bucket", daily_data_bucket,
+        "--actual-prefix", actual_data_prefix,
+        "--prediction-prefix", prediction_data_prefix,
         "--output-path", "/opt/ml/processing/output",
-        "--p-value-threshold", p_value_drift_threshold
+        "--p-value-threshold", p_value_drift_threshold, # <-- Đã sửa
+        "--model-mae-threshold", model_mae_drift_threshold
+    ],
+    property_files=[drift_property_file]
+)
+
+# --- (MỚI) Bước 3: Tổng hợp Dữ liệu (Consolidate Data) ---
+# (Giữ nguyên như file build_pipeline.py trước)
+consolidated_output_s3_uri = f"s3://{default_s3_bucket}/parking_data/" 
+
+sklearn_processor_consolidate = SKLearnProcessor(
+    framework_version="1.2", 
+    role=role,
+    instance_type=processing_instance_type,
+    instance_count=1,
+    base_job_name="consolidate-data-job",
+    sagemaker_session=sagemaker_session,
+)
+
+step_consolidate_data = ProcessingStep(
+    name="ConsolidateData",
+    processor=sklearn_processor_consolidate,
+    inputs=[
+         ProcessingInput(source=baseline_data_uri, destination="/opt/ml/processing/input_baseline")
+    ],
+    outputs=[
+        ProcessingOutput(output_name="new_baseline_data", source="/opt/ml/processing/output",
+                         destination=consolidated_output_s3_uri) 
+    ],
+    code="consolidate_data.py", 
+    job_arguments=[
+        "--baseline-data-uri", baseline_data_uri,
+        "--data-bucket", daily_data_bucket,
+        "--actual-prefix", actual_data_prefix,
+        "--output-path", "/opt/ml/processing/output",
     ]
 )
 
-# --- Định nghĩa Bước 2: Huấn luyện Mô hình (Training Step) ---
+# --- (MỚI) Bước 4: Huấn luyện Mô hình (Training Step) ---
+# (Giữ nguyên như file build_pipeline.py trước)
+model_output_s3_uri = f"s3://{default_s3_bucket}/pipeline-outputs/training-output/{model_version}"
 
-# Nơi lưu model.tar.gz
-model_output_s3_uri = f"s3://{S3_BUCKET}/pipeline-outputs/training-output/{model_version}/output/"
-# Nơi lưu metrics.json (từ 'SM_OUTPUT_DATA_DIR')
-metrics_output_s3_uri = f"s3://{S3_BUCKET}/pipeline-outputs/metrics-output/{model_version}/"
-# Nơi SageMaker upload code lên (bắt buộc)
-code_location_s3_uri = f"s3://{S3_BUCKET}/pipeline-code/training-code/{model_version}/"
-
-# Định nghĩa Estimator (môi trường) TensorFlow
 tf_estimator = TensorFlow(
-    entry_point="train_pipeline.py", # Script huấn luyện (phải ở cùng thư mục)
-    source_dir=".", # Thư mục chứa script
+    entry_point="train_pipeline.py", 
+    source_dir=".", 
     role=role,
     instance_count=1,
     instance_type=training_instance_type,
-    framework_version="2.15", # Phiên bản TensorFlow
-    py_version="py310",      # Phiên bản Python
-    hyperparameters={ # Truyền hyperparameters vào script train_pipeline.py
+    framework_version="2.15", 
+    py_version="py310",      
+    hyperparameters={
         "epochs": training_epochs,
         "learning-rate": 0.001,
-        "model-version": model_version # Truyền version ID
+        "model-version": model_version
     },
-    output_path=model_output_s3_uri, # Nơi lưu model.tar.gz
-    code_location=code_location_s3_uri,
+    output_path=model_output_s3_uri, 
+    code_location=f"s3://{default_s3_bucket}/pipeline-code/training-code/{model_version}",
     sagemaker_session=sagemaker_session,
-    # Định nghĩa thư mục output cho metrics (SM_OUTPUT_DATA_DIR)
-    environment={"SM_OUTPUT_DATA_DIR": "/opt/ml/output/data"} 
+    metric_definitions=[
+       {'Name': 'validation:loss', 'Regex': 'Validation Loss \\(MSE\\) của model tốt nhất: (\\S+)'}
+    ],
+    environment={"SM_OUTPUT_DATA_DIR": "/opt/ml/output/data"}
 )
 
-# Định nghĩa bước Training
 step_train_model = TrainingStep(
     name="TrainParkingModel",
     estimator=tf_estimator,
     inputs={
-        "training": TrainingInput( # Kênh input tên là "training"
-            s3_data=input_data_uri,
+        "training": TrainingInput(
+            s3_data=step_consolidate_data.properties.ProcessingOutputConfig.Outputs["new_baseline_data"].S3Output.S3Uri,
             distribution="FullyReplicated",
-            content_type="text/csv"
+            content_type="text/csv",
+            s3_data_type="S3Prefix"
         )
     }
-    # SageMaker sẽ tự động lưu model (từ /opt/ml/model) 
-    # và metrics (từ /opt/ml/output/data)
 )
 
-# --- Định nghĩa Bước 3: Điều kiện (Condition Step) ---
-
-# Đọc giá trị 'drift_detected' từ file JSON output của bước 1
+# --- Bước 2: Điều kiện (Condition Step) ---
 condition_drift_detected = ConditionEquals(
     left=JsonGet(
         step_name=step_check_drift.name,
-        # Lấy đường dẫn file JSON kết quả
-        property_file=drift_check_output.output_path + "/drift_check_result.json",
-        json_path="drift_detected" # Lấy giá trị của key "drift_detected"
+        property_file=drift_property_file, 
+        json_path="drift_detected" 
     ),
-    right=True # So sánh xem nó có bằng True (Boolean) không
+    right=True 
 )
 
-# Định nghĩa bước điều kiện
-step_conditional_training = ConditionStep(
+step_conditional_retrain_flow = ConditionStep(
     name="DriftCheckCondition",
-    conditions=[condition_drift_detected], # Điều kiện để kiểm tra
-    if_steps=[step_train_model], # Nếu True (có drift) -> Chạy bước huấn luyện
-    else_steps=[], # Nếu False (không drift) -> Không làm gì cả
+    conditions=[condition_drift_detected],
+    if_steps=[step_consolidate_data, step_train_model], 
+    else_steps=[], 
 )
 
-# --- Định nghĩa Bước 4: (Tùy chọn) Đăng ký Mô hình ---
-# Đây là bước nâng cao, bạn có thể thêm sau:
-# Sau khi train, đăng ký model vào SageMaker Model Registry
-# (Hiện tại Lambda của bạn đang làm việc này - so sánh và promote)
-
-# --- Tạo đối tượng Pipeline ---
+# --- Tạo Pipeline ---
 pipeline = Pipeline(
-    name=PIPELINE_NAME,
+    name=pipeline_name,
     parameters=[
-        input_data_uri,
-        model_version,
+        baseline_data_uri,
+        daily_data_bucket,
+        actual_data_prefix,
+        prediction_data_prefix,
         p_value_drift_threshold,
+        model_mae_drift_threshold,
+        model_version,
         training_epochs,
         processing_instance_type,
         training_instance_type,
     ],
-    steps=[step_check_drift, step_conditional_training], # Chạy drift check, sau đó là điều kiện
+    steps=[step_check_drift, step_conditional_retrain_flow],
     sagemaker_session=sagemaker_session,
 )
 
 if __name__ == "__main__":
-    print(f"Đang tạo/cập nhật Pipeline: {PIPELINE_NAME}")
-    try:
-        # Tạo hoặc cập nhật (Upsert) định nghĩa pipeline trên SageMaker
-        pipeline.upsert(role_arn=role)
-        print(f"Đã gửi định nghĩa Pipeline '{PIPELINE_NAME}' lên SageMaker thành công.")
-        print("Bạn có thể vào SageMaker Studio -> Pipelines để xem.")
-        print("Bước tiếp theo: Tạo EventBridge Schedule để trigger pipeline này.")
-    except Exception as e:
-        print(f"Lỗi khi upsert pipeline: {e}")
+    print(f"Creating/Updating Pipeline: {pipeline_name}")
+    pipeline.upsert(role_arn=role)
+    print("Pipeline definition submitted to SageMaker.")
 
