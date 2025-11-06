@@ -2,23 +2,22 @@ import json
 import os
 import boto3
 import logging
-import requests 
 
 # --- Cấu hình Logging ---
+# (Logger sẽ tự động ghi vào CloudWatch Logs)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # --- Khởi tạo Clients ---
+# Boto3 sẽ tự động sử dụng IAM Role của Lambda
 s3 = boto3.client('s3')
 sagemaker = boto3.client('sagemaker')
 
-# --- Lấy Biến Môi trường ---
+# --- Lấy Biến Môi trường (Bạn phải set các biến này trên AWS Lambda) ---
 try:
     S3_BUCKET = os.environ['S3_BUCKET']
-    GITHUB_REPO = os.environ['GITHUB_REPO'] 
-    GITHUB_PAT = os.environ['GITHUB_PAT']    
-    # Tên nhóm model package
     MODEL_PACKAGE_GROUP_NAME = os.environ['MODEL_PACKAGE_GROUP_NAME']
+    SAGEMAKER_ENDPOINT_NAME = os.environ['SAGEMAKER_ENDPOINT_NAME'] # (smart-parking-predictor')
 except KeyError as e:
     logger.error(f"LỖI NGHIÊM TRỌNG: Biến môi trường {e} chưa được set!")
     raise
@@ -26,18 +25,18 @@ except KeyError as e:
 def lambda_handler(event, context):
     """
     Được trigger khi SageMaker Pipeline 'Succeeded'.
-    Nhiệm vụ: Tìm model 'Pending' mới nhất, 'Approve' nó, và trigger GHA.
+    Nhiệm vụ: Tìm model 'Pending', 'Approve' nó, và 'Deploy/Update' Endpoint.
     """
     logger.info(f"Event nhận được: {json.dumps(event)}")
 
     try:
         # 1. Lấy thông tin từ sự kiện (event)
         pipeline_execution_arn = event['detail']['pipelineExecutionArn']
+        # Lấy ID thực thi
         execution_id = pipeline_execution_arn.split('/')[-1] 
         logger.info(f"Đang xử lý Pipeline Execution ID: {execution_id}")
 
         # === 2. Kiểm tra kết quả Drift Check ===
-        # (Vẫn kiểm tra xem có drift không, nếu không thì không làm gì cả)
         drift_result_key = f"pipeline-outputs/drift-check/{execution_id}/drift_check_result.json"
         
         try:
@@ -82,33 +81,75 @@ def lambda_handler(event, context):
             ModelApprovalStatus='Approved'
         )
         logger.info("Phê duyệt model hoàn tất.")
-
-        # === 5. Trigger GitHub Actions (Restart Service) ===
-        trigger_github_action_restart()
         
-        return {"statusCode": 200, "body": "Model đã được phê duyệt (Approved) và GHA trigger."}
+        # === 5. Deploy/Update Endpoint ===
+        logger.info(f"Bắt đầu quá trình deploy/update cho Endpoint: {SAGEMAKER_ENDPOINT_NAME}")
+        
+        # 5.1 Lấy thông tin model package vừa được approve
+        model_package_desc = sagemaker.describe_model_package(ModelPackageName=model_package_arn)
+        model_data_url = model_package_desc['InferenceSpecification']['Containers'][0]['ModelDataUrl']
+        image_uri = model_package_desc['InferenceSpecification']['Containers'][0]['Image']
+        
+        # 5.2 Tạo một Model (từ Model Package)
+        model_name = f"model-{execution_id}" # Tên model duy nhất
+        logger.info(f"Đang tạo Model: {model_name}")
+        
+        # Lấy IAM Role của Lambda (để SageMaker dùng)
+        # Cần đảm bảo Role này có quyền 'sagemaker:CreateModel'
+        lambda_role_arn = context.invoked_function_arn.split(":")[-2] # Lấy role ARN của chính hàm Lambda
+        execution_role_arn = f"arn:aws:iam::{lambda_role_arn.split(':')[4]}:role/{os.environ['AWS_LAMBDA_EXECUTION_ROLE']}"
+        
+        sagemaker.create_model(
+            ModelName=model_name,
+            PrimaryContainer={
+                'Image': image_uri,
+                'ModelDataUrl': model_data_url,
+            },
+            ExecutionRoleArn=execution_role_arn 
+        )
+
+        # 5.3 Tạo Endpoint Config mới
+        endpoint_config_name = f"epc-{execution_id}" # Tên config duy nhất
+        logger.info(f"Đang tạo Endpoint Config: {endpoint_config_name}")
+        sagemaker.create_endpoint_config(
+            EndpointConfigName=endpoint_config_name,
+            ProductionVariants=[
+                {
+                    'VariantName': 'AllTraffic',
+                    'ModelName': model_name,
+                    'InitialInstanceCount': 1,
+                    'ServerlessConfig': {
+                        'MemorySizeInMB': 2048, # Cần đủ RAM cho TensorFlow
+                        'MaxConcurrency': 10
+                    }
+                    # (HOẶC) Sử dụng Real-time
+                    # 'InstanceType': 'ml.m5.large' 
+                }
+            ]
+        )
+
+        # 5.4 Kiểm tra xem Endpoint đã tồn tại chưa
+        try:
+            sagemaker.describe_endpoint(EndpointName=SAGEMAKER_ENDPOINT_NAME)
+            # Nếu tồn tại -> Cập nhật (Update)
+            logger.info(f"Endpoint {SAGEMAKER_ENDPOINT_NAME} đã tồn tại. Đang cập nhật...")
+            sagemaker.update_endpoint(
+                EndpointName=SAGEMAKER_ENDPOINT_NAME,
+                EndpointConfigName=endpoint_config_name
+            )
+            logger.info("Update Endpoint thành công.")
+            
+        except sagemaker.exceptions.ClientError:
+            # Nếu chưa tồn tại -> Tạo mới (Create)
+            logger.info(f"Endpoint {SAGEMAKER_ENDPOINT_NAME} chưa tồn tại. Đang tạo mới...")
+            sagemaker.create_endpoint(
+                EndpointName=SAGEMAKER_ENDPOINT_NAME,
+                EndpointConfigName=endpoint_config_name
+            )
+            logger.info("Create Endpoint thành công.")
+        
+        return {"statusCode": 200, "body": f"Model đã được 'Approved' và deploy/update endpoint {SAGEMAKER_ENDPOINT_NAME}."}
 
     except Exception as e:
         logger.error(f"Lỗi trong quá trình thực thi Lambda: {e}")
         raise e
-
-def trigger_github_action_restart():
-    """
-    Gửi HTTP POST request đến GitHub API để trigger workflow 'mlops-jobs.yml'.
-    """
-    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/dispatches"
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "Authorization": f"token {GITHUB_PAT}"
-    }
-    payload = { "event_type": "trigger-restart" }
-    
-    logger.info(f"Đang trigger GitHub Action: {api_url} với event: {payload['event_type']}")
-    
-    try:
-        response = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=10)
-        response.raise_for_status()
-        logger.info(f"GitHub API response status: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Lỗi khi gọi GitHub API: {e}")
-

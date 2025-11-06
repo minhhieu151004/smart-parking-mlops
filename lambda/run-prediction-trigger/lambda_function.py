@@ -1,10 +1,10 @@
 import json
 import os
 import boto3
-import requests
 import logging
-from io import StringIO
+from io import StringIO, BytesIO
 from datetime import datetime
+import pandas as pd
 
 # --- Cấu hình Logging ---
 logger = logging.getLogger()
@@ -12,89 +12,107 @@ logger.setLevel(logging.INFO)
 
 # --- Khởi tạo Clients ---
 s3 = boto3.client('s3')
+sagemaker_runtime = boto3.client('sagemaker-runtime')
 
-# --- Lấy Biến Môi trường (Bạn phải set các biến này trên AWS Lambda) ---
+# --- Lấy Biến Môi trường ---
 try:
-    # URL đầy đủ của service API (ví dụ: http://54.12.34.56:5000/trigger_predict)
-    MODEL_SERVICE_URL = os.environ['MODEL_SERVICE_URL']
-    # Tên S3 Bucket
+    ENDPOINT_NAME = os.environ['SAGEMAKER_ENDPOINT_NAME']
     S3_BUCKET = os.environ['S3_BUCKET']
-    # Thư mục để ghi dự đoán (ví dụ: 'daily_predictions/')
     PREDICTION_PREFIX = os.environ['PREDICTION_PREFIX'] 
+    DATA_KEY = os.environ.get('DATA_KEY', 'parking_data/parking_data.csv') 
 except KeyError as e:
     logger.error(f"LỖI NGHIÊM TRỌNG: Biến môi trường {e} chưa được set!")
     raise
 
 def lambda_handler(event, context):
     """
-    Hàm Lambda này được trigger bởi S3 Event khi Pi upload file vào 'daily_actuals/'.
-    Nó sẽ gọi model service và ghi kết quả dự đoán vào 'daily_predictions/'.
+    Trigger bởi S3 (khi Pi upload).
+    Tải (Baseline + Mới), Nối (Concat), Gọi Endpoint, Ghi (Dự đoán).
     """
     logger.info(f"Event nhận được: {json.dumps(event)}")
 
     try:
-        # 1. Lấy thông tin file đã trigger sự kiện (file 'actuals' từ Pi)
-        # Chúng ta dùng thông tin này để quyết định tên file 'predictions'
-        triggering_bucket = event['Records'][0]['s3']['bucket']['name']
-        triggering_key = event['Records'][0]['s3']['object']['key'] # (ví dụ: 'daily_actuals/2025-10-31.csv')
+        # === 1. Tải Dữ liệu ===
         
-        # Chỉ xử lý nếu S3_BUCKET khớp và là file CSV
-        if triggering_bucket != S3_BUCKET or not triggering_key.endswith('.csv'):
-            logger.warning("Event không đúng bucket hoặc không phải file CSV. Bỏ qua.")
-            return
-
-        file_name = os.path.basename(triggering_key) # (ví dụ: '2025-10-31.csv')
-        prediction_key = f"{PREDICTION_PREFIX}{file_name}" # (ví dụ: 'daily_predictions/2025-10-31.csv')
-
-        logger.info(f"Đã phát hiện thay đổi trên {triggering_key}. Đang gọi Model Service...")
-
-        # === 2. Gọi Model Service API (trên EC2) ===
+        # 1a. Tải file Baseline (master)
+        logger.info(f"Đang tải dữ liệu baseline từ: s3://{S3_BUCKET}/{DATA_KEY}")
         try:
-            response = requests.post(MODEL_SERVICE_URL, timeout=10) # 10 giây timeout
-            response.raise_for_status() # Báo lỗi nếu status code là 4xx/5xx
-            prediction_data = response.json()
-            # prediction_data có dạng: {"predicted_car_count": 123, "for_timestamp": "..."}
+            obj_baseline = s3.get_object(Bucket=S3_BUCKET, Key=DATA_KEY)
+            df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')))
+        except Exception as e:
+            logger.error(f"Không thể tải file baseline {DATA_KEY}: {e}")
+            raise
             
-            logger.info(f"Model Service trả về: {prediction_data}")
+        # 1b. Tải file Mới (từ S3 event)
+        try:
+            triggering_bucket = event['Records'][0]['s3']['bucket']['name']
+            triggering_key = event['Records'][0]['s3']['object']['key'] # (ví dụ: 'daily_actuals/2025-10-31.csv')
+            
+            if triggering_bucket != S3_BUCKET:
+                raise ValueError("Event từ bucket không mong muốn.")
+                
+            logger.info(f"Đang tải dữ liệu mới từ (trigger): s3://{triggering_bucket}/{triggering_key}")
+            obj_new = s3.get_object(Bucket=triggering_bucket, Key=triggering_key)
+            df_new = pd.read_csv(StringIO(obj_new['Body'].read().decode('utf-8')))
+            
+        except (KeyError, IndexError, TypeError, s3.exceptions.NoSuchKey) as e:
+            logger.error(f"Không thể lấy file mới từ S3 event: {e}. Hủy bỏ.")
+            return {'statusCode': 400, 'body': 'Lỗi xử lý S3 event.'}
+            
+        # 1c. Nối (Combine) hai file
+        logger.info(f"Nối {len(df_baseline)} dòng (baseline) với {len(df_new)} dòng (mới).")
+        df_combined = pd.concat([df_baseline, df_new], ignore_index=True)
+        
+        # Chuyển đổi DataFrame kết hợp về dạng CSV (bytes)
+        combined_csv_buffer = StringIO()
+        df_combined.to_csv(combined_csv_buffer, index=False)
+        combined_csv_bytes = combined_csv_buffer.getvalue().encode('utf-8')
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Lỗi khi gọi Model Service tại {MODEL_SERVICE_URL}: {e}")
-            raise Exception("Không thể gọi Model Service.") from e
+        # === 2. Gọi SageMaker Endpoint ===
+        logger.info(f"Đang gọi SageMaker Endpoint: {ENDPOINT_NAME}")
+        try:
+            response = sagemaker_runtime.invoke_endpoint(
+                EndpointName=ENDPOINT_NAME,
+                ContentType='text/csv',
+                Body=combined_csv_bytes # Gửi CSV đã nối
+            )
+            result_body = response['Body'].read().decode('utf-8')
+            prediction_data = json.loads(result_body)
+            # prediction_data có dạng: {"predicted_car_count": 88, "for_timestamp": "..."}
+            
+            logger.info(f"SageMaker Endpoint trả về: {prediction_data}")
+
+        except Exception as e:
+            logger.error(f"Lỗi khi gọi SageMaker Endpoint {ENDPOINT_NAME}: {e}")
+            raise
 
         # === 3. Ghi/Nối (Append) kết quả vào S3 ===
-        # S3 không hỗ trợ "nối" file. Chúng ta phải: Đọc -> Sửa -> Ghi đè.
+        
+        # Quyết định file output (ví dụ: 'daily_predictions/2025-10-31.csv')
+        file_name = os.path.basename(triggering_key) 
+        prediction_key = f"{PREDICTION_PREFIX}{file_name}"
         
         file_content = ""
         header = "timestamp,predicted_car_count\n"
+        
         new_line = f"{prediction_data['for_timestamp']},{prediction_data['predicted_car_count']}\n"
 
         try:
-            # Thử đọc file dự đoán cũ (nếu đã tồn tại)
             obj = s3.get_object(Bucket=S3_BUCKET, Key=prediction_key)
             file_content = obj['Body'].read().decode('utf-8')
-            logger.info(f"Đã tìm thấy file dự đoán cũ: {prediction_key}. Đang nối...")
-            
-            # Đảm bảo file cũ có header
             if not file_content.startswith(header.strip()):
-                file_content = header + file_content # Thêm header nếu thiếu
-                
+                file_content = header + file_content
         except s3.exceptions.NoSuchKey:
-            # File chưa tồn tại (lần dự đoán đầu tiên trong ngày)
-            logger.info(f"Không tìm thấy file dự đoán cũ. Đang tạo file mới: {prediction_key}")
-            file_content = header # Bắt đầu file mới với header
+            logger.info(f"Tạo file dự đoán mới: {prediction_key}")
+            file_content = header
         
-        # Nối dòng dự đoán mới
-        updated_content = file_content + new_line
+        updated_content = file_content.rstrip('\n') + '\n' + new_line
         
-        # Ghi đè file lên S3
         s3.put_object(Bucket=S3_BUCKET, Key=prediction_key, Body=updated_content.encode('utf-8'))
         
         logger.info(f"Đã ghi dự đoán thành công vào: s3://{S3_BUCKET}/{prediction_key}")
 
-        return {
-            'statusCode': 200,
-            'body': json.dumps(f"Đã xử lý dự đoán và lưu vào {prediction_key}")
-        }
+        return {'statusCode': 200}
 
     except Exception as e:
         logger.error(f"Lỗi trong quá trình thực thi Lambda: {e}")
