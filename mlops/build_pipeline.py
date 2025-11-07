@@ -51,8 +51,8 @@ model_mae_drift_threshold = ParameterString(name="ModelMaeDriftThreshold", defau
 model_version = ExecutionVariables.PIPELINE_EXECUTION_ID
 
 training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
-processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.m5.large")
-training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
+processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
+training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.t3.medium")
 
 # --- (Bước 1: step_check_drift - Giữ nguyên) ---
 drift_output_s3_uri = Join(
@@ -196,8 +196,8 @@ step_register_model = ModelStep(
    step_args=model.register(
        content_types=["text/csv"],
        response_types=["application/json"],
-       inference_instances=["ml.m5.large"], 
-       transform_instances=["ml.m5.large"],
+       inference_instances=["ml.t2.medium"], 
+       #transform_instances=["ml.t2.medium"],
        model_package_group_name=model_package_group_name, 
        
        # =========== (SỬA LỖI API TẠI ĐÂY) ===========
