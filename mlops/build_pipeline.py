@@ -52,7 +52,7 @@ model_version = ExecutionVariables.PIPELINE_EXECUTION_ID
 
 training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
-training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.t3.medium")
+training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 
 # --- (Bước 1: step_check_drift - Giữ nguyên) ---
 drift_output_s3_uri = Join(
