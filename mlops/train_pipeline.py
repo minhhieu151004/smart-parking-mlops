@@ -112,7 +112,8 @@ if __name__ == '__main__':
         logging.info("Model built.")
         logging.info(f"Starting model training for {args.epochs} epochs...")
 
-        temp_model_file = 'best_model_temp.keras'
+        # Đổi .keras sang .h5 cho file checkpoint tạm
+        temp_model_file = 'best_model_temp.h5'
         checkpoint = ModelCheckpoint(temp_model_file, monitor='val_loss', save_best_only=True)
         early_stopping = EarlyStopping(monitor='val_loss', patience=10)
 
