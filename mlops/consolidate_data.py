@@ -22,7 +22,7 @@ def consolidate(args):
         # Tải file baseline (chứa dữ liệu đến hết hôm kia)
         logging.info(f"Loading baseline data from s3://{args.baseline_bucket}/{args.baseline_key}...")
         obj_baseline = s3.get_object(Bucket=args.baseline_bucket, Key=args.baseline_key)
-        df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')))
+        df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
 
         # Tải file actual (chỉ chứa dữ liệu hôm qua)
         yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -30,15 +30,19 @@ def consolidate(args):
         
         logging.info(f"Loading actual data from s3://{args.data_bucket}/{actual_key}...")
         obj_actual = s3.get_object(Bucket=args.data_bucket, Key=actual_key)
-        df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')))
+        df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
         
         logging.info("Data loaded successfully.")
 
         # === 2. Nối (Append/Concat) Dữ liệu ===
         logging.info(f"Appending yesterday's data ({len(df_actual)} rows) to baseline ({len(df_baseline)} rows)...")
-        # Đảm bảo cột nhất quán (nếu cần)
-        # df_actual = df_actual[df_baseline.columns] 
-        df_new_master = pd.concat([df_baseline, df_actual], ignore_index=True)
+        
+        if df_actual.empty:
+            logging.warning("Actual data file is empty (seed run). Skipping concat.")
+            df_new_master = df_baseline
+        else:
+            df_new_master = pd.concat([df_baseline, df_actual], ignore_index=True)
+            
         logging.info(f"New master file has {len(df_new_master)} rows.")
 
         # === 3. Ghi kết quả ra Output Path của SageMaker ===
@@ -49,7 +53,7 @@ def consolidate(args):
         logging.info("Consolidation complete.")
 
     except Exception as e:
-        logging.error(f"Error during consolidation: {e}")
+        logging.error(f"Error during consolidation: {e}", exc_info=True)
         raise
 
 if __name__ == '__main__':
