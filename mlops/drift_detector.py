@@ -24,7 +24,7 @@ def align_dataframe_by_time(df, value_col):
         # Trả về một Series rỗng (NaN) với index chuẩn
         return pd.Series(index=full_time_index, dtype=float)
         
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
     
     # 2. Đặt timestamp làm index
     df.set_index('timestamp', inplace=True)
@@ -57,7 +57,7 @@ def check_drift(args):
         # === 1. Tải Dữ liệu ===
         logging.info(f"Loading baseline data from {args.baseline_data_uri}...")
         obj_baseline = s3.get_object(Bucket=args.baseline_bucket, Key=args.baseline_key)
-        df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')))
+        df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
 
         yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
         actual_key = f"{args.actual_prefix}{yesterday_str}.csv"
@@ -65,18 +65,27 @@ def check_drift(args):
         
         logging.info(f"Loading actual data from s3://{args.data_bucket}/{actual_key}...")
         obj_actual = s3.get_object(Bucket=args.data_bucket, Key=actual_key)
-        df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')))
+        df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
         
         logging.info(f"Loading prediction data from s3://{args.data_bucket}/{pred_key}...")
         obj_pred = s3.get_object(Bucket=args.data_bucket, Key=pred_key)
+        df_pred = pd.read_csv(StringIO(obj_pred['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
         
         logging.info("All data loaded successfully.")
 
         # === 2. Tính Data Drift (KS-Test) ===
         logging.info("Calculating Data Drift (Baseline vs Actual) using KS-Test...")
         
-        ks_statistic, p_value = ks_2samp(df_baseline['car_count'].dropna(), df_actual['car_count'].dropna())
-        data_drift_detected = p_value < args.p_value_threshold
+        df_actual_data = df_actual['car_count'].dropna()
+        
+        if df_actual_data.empty:
+            logging.warning("Actual data file is empty (seed run). Forcing data drift detection.")
+            data_drift_detected = True
+            p_value = 0.0
+            ks_statistic = float('inf')
+        else:
+            ks_statistic, p_value = ks_2samp(df_baseline['car_count'].dropna(), df_actual_data)
+            data_drift_detected = p_value < args.p_value_threshold
         
         logging.info(f"Data Drift (KS-Test): KS Statistic={ks_statistic:.4f}, P-value={p_value:.4f}")
         if data_drift_detected:
@@ -96,7 +105,9 @@ def check_drift(args):
             
             # Kiểm tra nếu file trống (dẫn đến toàn NaN)
             if df_actual_aligned.isnull().all() or df_pred_aligned.isnull().all():
-                logging.warning("Actual or Prediction data is completely empty. Skipping Model MAE.")
+                logging.warning("Actual or Prediction data is completely empty (seed run). Assuming model drift.")
+                mae_model = float('inf')
+                model_drift_detected = True
             else:
                 # Tính MAE trực tiếp
                 mae_model = mean_absolute_error(df_actual_aligned, df_pred_aligned)
@@ -136,12 +147,13 @@ def check_drift(args):
 
         output_path = os.path.join(args.output_path, 'drift_check_result.json')
         logging.info(f"Writing drift check result to {output_path}")
+        os.makedirs(args.output_path, exist_ok=True) # (Thêm os.makedirs để đảm bảo)
         with open(output_path, 'w') as f:
             json.dump(result_data, f, indent=4)
 
     except Exception as e:
-        logging.error(f"Error during drift check: {e}")
-        result_data = { "error": str(e) }
+        logging.error(f"FATAL Error during drift check: {e}", exc_info=True) # (Thêm exc_info=True để log chi tiết)
+        result_data = { "error": str(e), "drift_detected": True } # (Buộc drift nếu có lỗi)
         output_path = os.path.join(args.output_path, 'drift_check_result.json')
         os.makedirs(args.output_path, exist_ok=True)
         with open(output_path, 'w') as f:
@@ -166,4 +178,3 @@ if __name__ == '__main__':
     args.baseline_key = '/'.join(args.baseline_data_uri.split('/')[3:])
 
     check_drift(args)
-
