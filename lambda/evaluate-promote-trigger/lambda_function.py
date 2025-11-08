@@ -35,7 +35,8 @@ def get_metrics_from_model_package(model_package_arn):
         )
         
         # 2. Tìm đường dẫn S3 của file metrics
-        metrics_s3_uri = package_desc['ModelMetrics']['ModelStatistics']['S3Uri']
+        #metrics_s3_uri = package_desc['ModelMetrics']['ModelStatistics']['S3Uri']
+        metrics_s3_uri = package_desc['ModelMetrics']['ModelQuality']['Statistics']['S3Uri']
         
         # 3. Tách bucket và key
         metrics_s3_path_parts = metrics_s3_uri.replace('s3://', '').split('/', 1)
