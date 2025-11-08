@@ -25,8 +25,8 @@ except KeyError as e:
 # --- Hàm Helper ---
 def get_metrics_from_model_package(model_package_arn):
     """
-    Hàm này lấy ARN, tìm file metrics.json trên S3,
-    tải về và parse nó.
+    Hàm này lấy ARN, tìm file metrics.json trên S3 (ngay cả khi nó
+    bị nén trong output.tar.gz), tải về và parse nó.
     """
     try:
         # 1. Lấy mô tả chi tiết của model package
@@ -35,7 +35,6 @@ def get_metrics_from_model_package(model_package_arn):
         )
         
         # 2. Tìm đường dẫn S3 của file metrics
-        #metrics_s3_uri = package_desc['ModelMetrics']['ModelStatistics']['S3Uri']
         metrics_s3_uri = package_desc['ModelMetrics']['ModelQuality']['Statistics']['S3Uri']
         
         # 3. Tách bucket và key
@@ -44,16 +43,69 @@ def get_metrics_from_model_package(model_package_arn):
         metrics_key = metrics_s3_path_parts[1]
         
         # 4. Tải và đọc file metrics.json
-        logger.info(f"Đang tải metrics từ: s3://{metrics_bucket}/{metrics_key}")
-        metrics_obj = s3.get_object(Bucket=metrics_bucket, Key=metrics_key)
-        metrics_data = json.loads(metrics_obj['Body'].read().decode('utf-8'))
-        
+        logger.info(f"Đang thử tải metrics trực tiếp từ: s3://{metrics_bucket}/{metrics_key}")
+        try:
+            # === KỊCH BẢN A: File metrics là một file .json độc lập ===
+            metrics_obj = s3.get_object(Bucket=metrics_bucket, Key=metrics_key)
+            metrics_data = json.loads(metrics_obj['Body'].read().decode('utf-8'))
+            logger.info("Tải file .json trực tiếp thành công.")
+
+        except s3.exceptions.NoSuchKey:
+            # === KỊCH BẢN B: Bị 'NoSuchKey'. File metrics nằm trong output.tar.gz ===
+            logger.warning(f"Không tìm thấy file {metrics_key}. " \
+                           "Giả định metrics nằm trong 'output.tar.gz' ở cùng thư mục.")
+            
+            # Xây dựng đường dẫn đến file output.tar.gz
+            metrics_dir = os.path.dirname(metrics_key)
+            tarball_key = os.path.join(metrics_dir, 'output.tar.gz')
+            
+            logger.info(f"Đang thử tải tarball từ: s3://{metrics_bucket}/{tarball_key}")
+            
+            try:
+                # Tải file .tar.gz
+                tar_obj = s3.get_object(Bucket=metrics_bucket, Key=tarball_key)
+                tar_data = BytesIO(tar_obj['Body'].read()) # Đọc vào bộ nhớ
+                
+                # Giải nén file trong bộ nhớ
+                with tarfile.open(fileobj=tar_data, mode='r:gz') as tar:
+                    # Tìm file 'metrics.json' bên trong tarball
+                    try:
+                        # Thử tìm 'metrics.json' trước
+                        metrics_file_info = tar.getmember('metrics.json')
+                    except KeyError:
+                        try:
+                            metrics_file_info = tar.getmember('metrics')
+                        except KeyError:
+                             logger.error(f"Không tìm thấy 'metrics' hoặc 'metrics.json' bên trong {tarball_key}")
+                             raise ValueError(f"Không tìm thấy file metrics bên trong tarball.")
+                    
+                    # Trích xuất và đọc file
+                    logger.info(f"Đọc file '{metrics_file_info.name}' từ bên trong tarball.")
+                    metrics_file = tar.extractfile(metrics_file_info)
+                    metrics_data = json.loads(metrics_file.read().decode('utf-8'))
+
+            except s3.exceptions.NoSuchKey:
+                logger.error(f"Lỗi nghiêm trọng: Đã thử {metrics_key} (NoSuchKey) " \
+                             f"VÀ {tarball_key} (NoSuchKey). Không thể tìm thấy metrics ở đâu.")
+                return float('inf')
+            except tarfile.TarError as tar_err:
+                logger.error(f"Lỗi khi giải nén {tarball_key}: {tar_err}")
+                return float('inf')
+
+        # 5. Lấy val_loss từ file metrics đã được parse
         val_loss = metrics_data.get('val_loss')
+        
         if val_loss is None:
             raise ValueError(f"Không tìm thấy 'val_loss' trong file metrics: {metrics_s3_uri}")
             
         return val_loss
 
+    except KeyError as e:
+        logger.error(f"Lỗi KeyError khi truy cập {e} trong ModelMetrics. " \
+                     "Rất có thể bạn đã đăng ký metrics với một tên khác " \
+                     "(không phải 'ModelQuality'). Vui lòng kiểm tra lại 'RegisterModel' step.")
+        logger.error(f"Cấu trúc ModelMetrics: {package_desc.get('ModelMetrics')}")
+        return float('inf')
     except Exception as e:
         logger.error(f"Lỗi khi lấy metrics từ {model_package_arn}: {e}")
         return float('inf') # Trả về lỗi vô cực nếu không đọc được
