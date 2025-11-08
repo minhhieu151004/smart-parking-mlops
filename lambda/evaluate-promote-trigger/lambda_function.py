@@ -57,7 +57,9 @@ def get_metrics_from_model_package(model_package_arn):
             
             # Xây dựng đường dẫn đến file output.tar.gz
             metrics_dir = os.path.dirname(metrics_key)
-            tarball_key = os.path.join(metrics_dir, 'output.tar.gz')
+
+            parent_dir = os.path.dirname(metrics_dir)
+            tarball_key = os.path.join(parent_dir, 'output.tar.gz')
             
             logger.info(f"Đang thử tải tarball từ: s3://{metrics_bucket}/{tarball_key}")
             
