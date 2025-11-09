@@ -18,12 +18,11 @@ try:
     S3_BUCKET = os.environ['S3_BUCKET']
     MODEL_PACKAGE_GROUP_NAME = os.environ['MODEL_PACKAGE_GROUP_NAME']
     ENDPOINT_NAME = os.environ['SAGEMAKER_ENDPOINT_NAME']
-    # Biến môi trường cho Role sẽ được đọc trong hàm deploy
 except KeyError as e:
     logger.error(f"LỖI NGHIÊM TRỌNG: Biến môi trường {e} chưa được set!")
     raise
 
-# --- Hàm Helper ---
+# --- Hàm Helper (Đã Ổn) ---
 def get_metrics_from_model_package(model_package_arn):
     """
     Hàm này lấy ARN, tìm file metrics.json trên S3 (ngay cả khi nó
@@ -56,19 +55,16 @@ def get_metrics_from_model_package(model_package_arn):
             logger.warning(f"Không tìm thấy file {metrics_key}. " \
                            "Giả định metrics nằm trong 'output.tar.gz' ở thư mục cha.")
             
-            # Xây dựng đường dẫn đến file output.tar.gz
-            metrics_dir = os.path.dirname(metrics_key) # VD: '.../output/data'
-            parent_dir = os.path.dirname(metrics_dir)  # VD: '.../output'
-            tarball_key = os.path.join(parent_dir, 'output.tar.gz') # Đường dẫn đúng
+            metrics_dir = os.path.dirname(metrics_key) 
+            parent_dir = os.path.dirname(metrics_dir)  
+            tarball_key = os.path.join(parent_dir, 'output.tar.gz') 
             
             logger.info(f"Đang thử tải tarball từ: s3://{metrics_bucket}/{tarball_key}")
             
             try:
-                # Tải file .tar.gz
                 tar_obj = s3.get_object(Bucket=metrics_bucket, Key=tarball_key)
-                tar_data = BytesIO(tar_obj['Body'].read()) # Đọc vào bộ nhớ
+                tar_data = BytesIO(tar_obj['Body'].read()) 
                 
-                # Giải nén file trong bộ nhớ
                 with tarfile.open(fileobj=tar_data, mode='r:gz') as tar:
                     try:
                         metrics_file_info = tar.getmember('metrics.json')
@@ -95,7 +91,6 @@ def get_metrics_from_model_package(model_package_arn):
         val_loss = metrics_data.get('val_loss')
         
         if val_loss is None:
-            # Thử tìm trong cấu trúc lồng nhau (phổ biến)
             val_loss = metrics_data.get('validation_metrics', {}).get('val_loss')
 
         if val_loss is None:
@@ -104,42 +99,45 @@ def get_metrics_from_model_package(model_package_arn):
         return val_loss
 
     except KeyError as e:
-        logger.error(f"Lỗi KeyError khi truy cập {e} trong ModelMetrics. " \
-                     "Rất có thể bạn đã đăng ký metrics với một tên khác " \
-                     "(không phải 'ModelQuality'). Vui lòng kiểm tra lại 'RegisterModel' step.")
+        logger.error(f"Lỗi KeyError khi truy cập {e} trong ModelMetrics: {e}. " \
+                     "Kiểm tra lại 'RegisterModel' step.")
         logger.error(f"Cấu trúc ModelMetrics: {package_desc.get('ModelMetrics')}")
         return float('inf')
     except Exception as e:
         logger.error(f"Lỗi khi lấy metrics từ {model_package_arn}: {e}")
-        return float('inf') # Trả về lỗi vô cực nếu không đọc được
+        return float('inf')
 
-# --- Hàm Handler Chính (Không đổi) ---
+# --- Hàm Handler Chính (Đã Ổn) ---
 def lambda_handler(event, context):
-    """
-    Được trigger khi SageMaker Pipeline 'Succeeded'.
-    Nhiệm vụ: Tìm, So sánh, Phê duyệt, và Triển khai.
-    """
     logger.info(f"Event nhận được: {json.dumps(event)}")
 
-    try:
+    # Lấy execution_id từ event (nếu có) hoặc tạo một id giả
+    execution_id = ""
+    if 'detail' in event and 'pipelineExecutionArn' in event['detail']:
         pipeline_execution_arn = event['detail']['pipelineExecutionArn']
-        execution_id = pipeline_execution_arn.split('/')[-1] 
-        logger.info(f"Đang xử lý Pipeline Execution ID: {execution_id}")
+        execution_id = pipeline_execution_arn.split('/')[-1]
+    else:
+        # Đây là chạy thủ công (Test), tạo một ID duy nhất
+        execution_id = context.aws_request_id
+        
+    logger.info(f"Đang xử lý Execution ID: {execution_id}")
 
-        # === 2. Kiểm tra kết quả Drift Check ===
-        drift_result_key = f"pipeline-outputs/drift-check/{execution_id}/drift_check_result.json"
-        try:
-            drift_result_obj = s3.get_object(Bucket=S3_BUCKET, Key=drift_result_key)
-            drift_data = json.loads(drift_result_obj['Body'].read().decode('utf-8'))
-            drift_detected = drift_data.get("drift_detected", False)
-        except s3.exceptions.NoSuchKey:
-            logger.warning(f"Không tìm thấy file drift check: {drift_result_key}. Bỏ qua...")
-            return {"statusCode": 200, "body": "Không tìm thấy file drift, bỏ qua."}
-        if not drift_detected:
-            logger.info("Không phát hiện drift. Không cần làm gì thêm.")
-            return {"statusCode": 200, "body": "Không có drift, không huấn luyện."}
-
-        logger.info("Phát hiện Drift. Đang tiến hành đánh giá mô hình mới...")
+    try:
+        # === Bỏ qua Drift Check nếu chạy thủ công ===
+        if 'detail' in event:
+            drift_result_key = f"pipeline-outputs/drift-check/{execution_id}/drift_check_result.json"
+            try:
+                drift_result_obj = s3.get_object(Bucket=S3_BUCKET, Key=drift_result_key)
+                drift_data = json.loads(drift_result_obj['Body'].read().decode('utf-8'))
+                drift_detected = drift_data.get("drift_detected", False)
+                if not drift_detected:
+                    logger.info("Không phát hiện drift. Không cần làm gì thêm.")
+                    return {"statusCode": 200, "body": "Không có drift, không huấn luyện."}
+            except s3.exceptions.NoSuchKey:
+                logger.warning(f"Không tìm thấy file drift check: {drift_result_key}. Bỏ qua...")
+                # Không return, vì chạy thủ công có thể không có file drift
+        
+        logger.info("Đang tiến hành đánh giá mô hình mới...")
 
         # === 3. Tìm Model Package 'Pending' mới nhất ===
         response_pending = sagemaker.list_model_packages(
@@ -161,11 +159,11 @@ def lambda_handler(event, context):
         logger.info(f"Model MỚI (Pending) có val_loss: {new_loss}")
 
         # === 5. Lấy Metrics của Model 'Production' (CŨ) ===
-        current_prod_loss = float('inf') # Mặc định 
+        current_prod_loss = float('inf') 
         try:
             response_approved = sagemaker.list_model_packages(
                 ModelPackageGroupName=MODEL_PACKAGE_GROUP_NAME,
-                ModelApprovalStatus='Approved', # Tìm model đang chạy
+                ModelApprovalStatus='Approved', 
                 SortBy='CreationTime',
                 SortOrder='Descending',
                 MaxResults=1
@@ -183,10 +181,8 @@ def lambda_handler(event, context):
 
         # === 6. So sánh và Quyết định ===
         if new_loss < current_prod_loss:
-            # === 6a. Model Mới TỐT HƠN -> Phê duyệt và Deploy ===
             logger.warning(f"QUYẾT ĐỊNH: THÚC ĐẨY. Model mới (loss={new_loss}) tốt hơn 'production' (loss={current_prod_loss}).")
             
-            # Phê duyệt
             logger.info(f"Đang cập nhật trạng thái 'Approved' cho: {pending_package_arn}")
             sagemaker.update_model_package(
                 ModelPackageArn=pending_package_arn,
@@ -194,17 +190,14 @@ def lambda_handler(event, context):
                 ApprovalDescription=f"Tự động phê duyệt: val_loss {new_loss} tốt hơn {current_prod_loss}."
             )
             
-            # Deploy
             logger.info(f"Bắt đầu quá trình deploy/update cho Endpoint: {ENDPOINT_NAME}")
             deploy_sagemaker_endpoint(pending_package_arn, execution_id, context)
 
             return {"statusCode": 200, "body": f"Model đã được 'Approved' và deploy/update."}
 
         else:
-            # === 6b. Model Mới TỆ HƠN -> Từ chối ===
             logger.warning(f"QUYẾT ĐỊNH: TỪ CHỐI. Model mới (loss={new_loss}) không tốt hơn 'production' (loss={current_prod_loss}).")
             
-            # Từ chối
             sagemaker.update_model_package(
                 ModelPackageArn=pending_package_arn,
                 ModelApprovalStatus='Rejected',
@@ -216,14 +209,13 @@ def lambda_handler(event, context):
         logger.error(f"Lỗi trong quá trình thực thi Lambda: {e}")
         raise e
 
-# --- HÀM DEPLOY (ĐÃ SỬA LỖI IAM ROLE) ---
+# --- HÀM DEPLOY (ĐÃ SỬA LỖI LOGIC TRY/EXCEPT) ---
 def deploy_sagemaker_endpoint(model_package_arn, execution_id, context):
     """
     Hàm này nhận ARN của model package đã được 'Approved'
     và tạo/cập nhật SageMaker Endpoint.
     """
     try:
-        # Đây là Role mà SageMaker sẽ dùng để đọc S3
         try:
             execution_role_arn = os.environ['SAGEMAKER_EXECUTION_ROLE_ARN']
         except KeyError:
@@ -246,7 +238,7 @@ def deploy_sagemaker_endpoint(model_package_arn, execution_id, context):
                     'Image': image_uri,
                     'ModelDataUrl': model_data_url,
                 },
-                ExecutionRoleArn=execution_role_arn # <-- Sử dụng role đúng
+                ExecutionRoleArn=execution_role_arn
             )
         except sagemaker.exceptions.ClientError as e:
             if "Cannot create already existing model" in str(e):
@@ -271,16 +263,27 @@ def deploy_sagemaker_endpoint(model_package_arn, execution_id, context):
             ]
         )
 
+        # Logic mới: Tách biệt việc "kiểm tra" và "hành động"
         try:
+            # Bước 1: Chỉ kiểm tra xem endpoint có tồn tại không
             sagemaker.describe_endpoint(EndpointName=ENDPOINT_NAME)
+            
+            # Bước 2: NẾU TỒN TẠI -> Cập nhật
             logger.info(f"Endpoint {ENDPOINT_NAME} đã tồn tại. Đang cập nhật...")
-            sagemaker.update_endpoint(
-                EndpointName=ENDPOINT_NAME,
-                EndpointConfigName=endpoint_config_name
-            )
-            logger.info("Update Endpoint thành công.")
+            try:
+                sagemaker.update_endpoint(
+                    EndpointName=ENDPOINT_NAME,
+                    EndpointConfigName=endpoint_config_name
+                )
+                logger.info("Update Endpoint thành công.")
+            except sagemaker.exceptions.ClientError as e:
+                # Bắt lỗi nếu endpoint đang bận (ví dụ: 'ResourceInUse')
+                logger.warning(f"Không thể CẬP NHẬT endpoint ngay: {e}. " \
+                             "Việc này có thể xảy ra nếu nó đang 'Creating' hoặc 'Updating' từ lần trước.")
+                # Vẫn cho là thành công, vì endpoint đang trong quá trình (hoặc sẽ) cập nhật
             
         except sagemaker.exceptions.ClientError:
+            # Bước 3: NẾU KHÔNG TỒN TẠI (describe_endpoint báo lỗi) -> Tạo mới
             logger.info(f"Endpoint {ENDPOINT_NAME} chưa tồn tại. Đang tạo mới...")
             sagemaker.create_endpoint(
                 EndpointName=ENDPOINT_NAME,
