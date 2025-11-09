@@ -18,6 +18,7 @@ try:
     S3_BUCKET = os.environ['S3_BUCKET']
     MODEL_PACKAGE_GROUP_NAME = os.environ['MODEL_PACKAGE_GROUP_NAME']
     ENDPOINT_NAME = os.environ['SAGEMAKER_ENDPOINT_NAME']
+    # Biến môi trường cho Role sẽ được đọc trong hàm deploy
 except KeyError as e:
     logger.error(f"LỖI NGHIÊM TRỌNG: Biến môi trường {e} chưa được set!")
     raise
@@ -53,13 +54,12 @@ def get_metrics_from_model_package(model_package_arn):
         except s3.exceptions.NoSuchKey:
             # === KỊCH BẢN B: Bị 'NoSuchKey'. File metrics nằm trong output.tar.gz ===
             logger.warning(f"Không tìm thấy file {metrics_key}. " \
-                           "Giả định metrics nằm trong 'output.tar.gz' ở cùng thư mục.")
+                           "Giả định metrics nằm trong 'output.tar.gz' ở thư mục cha.")
             
             # Xây dựng đường dẫn đến file output.tar.gz
-            metrics_dir = os.path.dirname(metrics_key)
-
-            parent_dir = os.path.dirname(metrics_dir)
-            tarball_key = os.path.join(parent_dir, 'output.tar.gz')
+            metrics_dir = os.path.dirname(metrics_key) # VD: '.../output/data'
+            parent_dir = os.path.dirname(metrics_dir)  # VD: '.../output'
+            tarball_key = os.path.join(parent_dir, 'output.tar.gz') # Đường dẫn đúng
             
             logger.info(f"Đang thử tải tarball từ: s3://{metrics_bucket}/{tarball_key}")
             
@@ -70,9 +70,7 @@ def get_metrics_from_model_package(model_package_arn):
                 
                 # Giải nén file trong bộ nhớ
                 with tarfile.open(fileobj=tar_data, mode='r:gz') as tar:
-                    # Tìm file 'metrics.json' bên trong tarball
                     try:
-                        # Thử tìm 'metrics.json' trước
                         metrics_file_info = tar.getmember('metrics.json')
                     except KeyError:
                         try:
@@ -81,7 +79,6 @@ def get_metrics_from_model_package(model_package_arn):
                              logger.error(f"Không tìm thấy 'metrics' hoặc 'metrics.json' bên trong {tarball_key}")
                              raise ValueError(f"Không tìm thấy file metrics bên trong tarball.")
                     
-                    # Trích xuất và đọc file
                     logger.info(f"Đọc file '{metrics_file_info.name}' từ bên trong tarball.")
                     metrics_file = tar.extractfile(metrics_file_info)
                     metrics_data = json.loads(metrics_file.read().decode('utf-8'))
@@ -98,7 +95,11 @@ def get_metrics_from_model_package(model_package_arn):
         val_loss = metrics_data.get('val_loss')
         
         if val_loss is None:
-            raise ValueError(f"Không tìm thấy 'val_loss' trong file metrics: {metrics_s3_uri}")
+            # Thử tìm trong cấu trúc lồng nhau (phổ biến)
+            val_loss = metrics_data.get('validation_metrics', {}).get('val_loss')
+
+        if val_loss is None:
+            raise ValueError(f"Không tìm thấy 'val_loss' (hoặc 'validation_metrics.val_loss') trong file metrics: {metrics_s3_uri}")
             
         return val_loss
 
@@ -112,7 +113,7 @@ def get_metrics_from_model_package(model_package_arn):
         logger.error(f"Lỗi khi lấy metrics từ {model_package_arn}: {e}")
         return float('inf') # Trả về lỗi vô cực nếu không đọc được
 
-# --- Hàm Handler Chính (Đã cập nhật) ---
+# --- Hàm Handler Chính (Không đổi) ---
 def lambda_handler(event, context):
     """
     Được trigger khi SageMaker Pipeline 'Succeeded'.
@@ -215,26 +216,28 @@ def lambda_handler(event, context):
         logger.error(f"Lỗi trong quá trình thực thi Lambda: {e}")
         raise e
 
+# --- HÀM DEPLOY (ĐÃ SỬA LỖI IAM ROLE) ---
 def deploy_sagemaker_endpoint(model_package_arn, execution_id, context):
     """
     Hàm này nhận ARN của model package đã được 'Approved'
     và tạo/cập nhật SageMaker Endpoint.
     """
     try:
+        # Đây là Role mà SageMaker sẽ dùng để đọc S3
+        try:
+            execution_role_arn = os.environ['SAGEMAKER_EXECUTION_ROLE_ARN']
+        except KeyError:
+            logger.error("LỖI NGHIÊM TRỌNG: Biến môi trường 'SAGEMAKER_EXECUTION_ROLE_ARN' chưa được set!")
+            raise ValueError("SAGEMAKER_EXECUTION_ROLE_ARN_MISSING")
+        
+        logger.info(f"Sử dụng SageMaker Execution Role: {execution_role_arn}")
+        
         model_package_desc = sagemaker.describe_model_package(ModelPackageName=model_package_arn)
         model_data_url = model_package_desc['InferenceSpecification']['Containers'][0]['ModelDataUrl']
         image_uri = model_package_desc['InferenceSpecification']['Containers'][0]['Image']
         
         model_name = f"model-{execution_id}" 
         logger.info(f"Đang tạo Model: {model_name}")
-        
-        # Lấy IAM Role của Lambda (Role này cần quyền sagemaker:CreateModel)
-        lambda_role_arn = context.invoked_function_arn
-        account_id = lambda_role_arn.split(':')[4]
-        role_name = os.environ.get('AWS_LAMBDA_EXECUTION_ROLE_NAME', 'Lambda-SmartParking-ExecutionRol')
-        execution_role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        
-        logger.info(f"Sử dụng Execution Role: {execution_role_arn}")
         
         try:
             sagemaker.create_model(
@@ -243,13 +246,14 @@ def deploy_sagemaker_endpoint(model_package_arn, execution_id, context):
                     'Image': image_uri,
                     'ModelDataUrl': model_data_url,
                 },
-                ExecutionRoleArn=execution_role_arn
+                ExecutionRoleArn=execution_role_arn # <-- Sử dụng role đúng
             )
         except sagemaker.exceptions.ClientError as e:
             if "Cannot create already existing model" in str(e):
                 logger.warning(f"Model {model_name} đã tồn tại. Bỏ qua tạo model.")
             else:
-                raise e
+                logger.error(f"Lỗi khi create_model: {e}")
+                raise e 
 
         endpoint_config_name = f"epc-{execution_id}" 
         logger.info(f"Đang tạo Endpoint Config: {endpoint_config_name}")
