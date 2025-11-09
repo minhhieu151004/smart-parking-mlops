@@ -15,6 +15,8 @@ import logging
 import json
 from datetime import datetime
 import sys
+# Import thêm tensorflow
+import tensorflow as tf
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -71,7 +73,7 @@ if __name__ == '__main__':
     try:
         data_file_path = os.path.join(input_data_path, 'parking_data.csv') 
         if not os.path.exists(data_file_path):
-             data_file_path = input_data_path 
+            data_file_path = input_data_path 
         
         logging.info(f"Loading data from {data_file_path}...")
         csv_files = [f for f in os.listdir(input_data_path) if f.endswith('.csv')]
@@ -87,13 +89,13 @@ if __name__ == '__main__':
         df_processed, scaler_car, scaler_hour = preprocess_data(df)
         
         if df_processed.empty or len(df_processed) < (args.n_steps + args.future_step):
-             raise ValueError(f"Không đủ dữ liệu sau khi xử lý. Cần ít nhất {args.n_steps + args.future_step} dòng, chỉ có {len(df_processed)}.")
+            raise ValueError(f"Không đủ dữ liệu sau khi xử lý. Cần ít nhất {args.n_steps + args.future_step} dòng, chỉ có {len(df_processed)}.")
 
         X, y = create_sequences(df_processed, n_steps=args.n_steps, future_step=args.future_step)
         
         if X.shape[0] == 0:
-             raise ValueError("Không thể tạo sequences (dãy) từ dữ liệu. Dữ liệu quá ngắn.")
-             
+            raise ValueError("Không thể tạo sequences (dãy) từ dữ liệu. Dữ liệu quá ngắn.")
+            
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
         logging.info(f"Data split. Train shape: {X_train.shape}, Validation shape: {X_val.shape}")
 
@@ -136,10 +138,20 @@ if __name__ == '__main__':
         }
 
         logging.info(f"Saving model artifacts to {model_dir}")
-        model_save_path = os.path.join(model_dir, 'best_cnn_lstm_model.keras')
-        best_model.save(model_save_path)
-        logging.info(f"Model saved to {model_save_path}")
-        os.remove(temp_model_file)
+
+        # SageMaker TensorFlow Serving yêu cầu model được lưu ở định dạng SavedModel
+        # trong một thư mục con có tên là một số (ví dụ: '1')
+        export_path = os.path.join(model_dir, '1')
+        logging.info(f"Saving model in SavedModel format to: {export_path}")
+
+        # Lưu model. KHÔNG thêm đuôi .keras.
+        # Lệnh này sẽ tự động tạo thư mục '1' với file 'saved_model.pb'
+        best_model.save(export_path) 
+        
+        logging.info("Model in SavedModel format saved successfully.")
+        
+        # Xóa file checkpoint .h5 tạm thời
+        os.remove(temp_model_file) 
 
         scaler_car_path = os.path.join(model_dir, 'scaler_car_count.pkl')
         joblib.dump(scaler_car, scaler_car_path)
