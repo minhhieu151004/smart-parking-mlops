@@ -1,7 +1,4 @@
-# .github/workflows/deploy-lambda.yml
-#
-# Workflow CI/CD DUY NHẤT: Tự động đóng gói và deploy
-# CẢ HAI hàm Lambda lên AWS khi có push code vào thư mục 'lambda/'.
+# Workflow CI/CD : Tự động đóng gói và deploy CẢ HAI hàm Lambda lên AWS khi có push code vào thư mục 'lambda/'.
 
 name: CI/CD - Deploy Lambda Functions
 
