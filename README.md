@@ -4,7 +4,7 @@
 
 ## **Kiến trúc Hệ thống**
 
-![](images/system_flow.png)
+![](images/system-architecture.png)
 
 * **Data/Model Storage: Amazon S3**  
    * **Lưu trữ dữ liệu lịch sử đỗ xe và kết quả dự đoán từ endpoint.**   
