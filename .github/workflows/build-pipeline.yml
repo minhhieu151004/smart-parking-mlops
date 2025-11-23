@@ -32,6 +32,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade boto3 "sagemaker>=2.100.0" pandas
 
+      - name: Debug Installed Versions
+        run: |
+          # Bước này để kiểm tra xem version nào thực sự được cài
+          pip show sagemaker
+          python -c "import sagemaker; print(f'SageMaker Version: {sagemaker.__version__}')"
+
       - name: Run Build Pipeline
         run: |
           python mlops/build_pipeline.py
