@@ -19,11 +19,17 @@ def model_fn(model_dir):
     """
     print(f"Bắt đầu tải model từ thư mục: {model_dir}")
     
-    model_path = os.path.join(model_dir, 'best_cnn_lstm_model.keras')
+    
+    # Trỏ vào thư mục '1' chứa SavedModel
+    model_path = os.path.join(model_dir, '1')
+
     scaler_car_path = os.path.join(model_dir, 'scaler_car_count.pkl')
     scaler_hour_path = os.path.join(model_dir, 'scaler_hour.pkl')
     
-    model = load_model(model_path, compile=False)
+    print(f"Loading model from: {model_path}")
+    # TensorFlow tự động nhận diện SavedModel từ thư mục
+    model = tf.keras.models.load_model(model_path)
+    
     scaler_car = joblib.load(scaler_car_path)
     scaler_hour = joblib.load(scaler_hour_path)
     
