@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies (boto3, sagemaker)
         run: |
           python -m pip install --upgrade pip
-          pip install boto3 sagemaker
+          pip install --upgrade boto3 "sagemaker>=2.100.0" pandas
 
       - name: Run Build Pipeline
         run: |
