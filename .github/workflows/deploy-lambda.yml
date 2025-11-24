@@ -5,7 +5,6 @@ name: CI/CD - Deploy Lambda Functions
 on:
   push:
     branches: [ main ]
-    # Kích hoạt workflow CHỈ KHI có thay đổi trong thư mục lambda/
     paths:
       - 'lambda/**'
 
@@ -107,3 +106,53 @@ jobs:
           aws lambda update-function-code \
             --function-name run-prediction-trigger \
             --zip-file fileb://lambda-pred-deploy.zip
+
+  # === JOB 3: Deploy Hàm Daily Export (MỚI) ===
+  deploy-export-lambda:
+    name: Deploy Daily Export Lambda
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build and Package Lambda (Export)
+        run: |
+          echo "Bắt đầu đóng gói hàm daily-export-to-s3..."
+          mkdir package_export
+          
+          if [ -f lambda/daily-export-to-s3/requirements.txt ]; then
+            pip install \
+              -r lambda/daily-export-to-s3/requirements.txt \
+              -t ./package_export \
+              --platform manylinux2014_x86_64 \
+              --only-binary=:all: \
+              --upgrade
+          fi
+          
+          # Copy code Python
+          cp lambda/daily-export-to-s3/lambda_function.py ./package_export/
+          
+          # 4. Nén
+          cd package_export
+          zip -r ../lambda-export-deploy.zip .
+          cd ..
+          echo "Đóng gói lambda-export-deploy.zip hoàn tất."
+
+      - name: Deploy to AWS Lambda (Export)
+        run: |
+          aws lambda update-function-code \
+            --function-name daily-export-to-s3 \
+            --zip-file fileb://lambda-export-deploy.zip
