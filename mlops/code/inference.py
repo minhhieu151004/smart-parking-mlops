@@ -129,7 +129,7 @@ def predict_fn(input_data_df, model_artifacts):
 
 def output_fn(prediction_result, response_content_type):
     """
-    Hàm này định dạng kết quả trả về cho Lambda.
+    Hàm này định dạng kết quả trả về cho Lambda..
     """
     if response_content_type == 'application/json':
         return json.dumps(prediction_result)
