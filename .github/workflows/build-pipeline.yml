@@ -33,7 +33,8 @@ jobs:
           pip install "boto3==1.40.55" "sagemaker==2.254.1" pandas
 
       - name: Run Build Pipeline
+        working-directory: ./mlops
         run: |
-          python mlops/build_pipeline.py
+          python build_pipeline.py
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
