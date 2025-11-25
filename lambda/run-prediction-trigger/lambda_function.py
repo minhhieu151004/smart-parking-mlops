@@ -36,7 +36,10 @@ def lambda_handler(event, context):
     # 2. Xử lý dữ liệu sang JSON
     df = pd.DataFrame(items)
 
-    df['car_count'] = df['car_count'].astype(float)
+    if 'car_count' in df.columns:
+        df['car_count'] = df['car_count'].apply(lambda x: float(x))
+    else:
+        return {"status": "Error - Missing column"}
     
     # Chọn cột cần thiết
     df = df[['car_count', 'timestamp']]
