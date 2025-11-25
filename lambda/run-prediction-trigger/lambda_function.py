@@ -17,7 +17,7 @@ table_pred = dynamodb.Table(TABLE_PRED)
 runtime = boto3.client('sagemaker-runtime')
 
 def lambda_handler(event, context):
-    print("Có dữ liệu mới từ DynamoDB! Đang lấy ngữ cảnh lịch sử...")
+    print("Có dữ liệu mới! Đang xử lý...")
 
     # 1. Lấy 288 dòng dữ liệu gần nhất
     response = table_raw.query(
@@ -28,28 +28,31 @@ def lambda_handler(event, context):
     items = response['Items']
     
     if len(items) < 288:
-        print(f"Chưa đủ dữ liệu (Hiện có: {len(items)} dòng). Cần tối thiểu 288 dòng.")
+        print(f"Chưa đủ dữ liệu (Hiện có: {len(items)} dòng).")
         return {"status": "Not enough data"}
 
     items.reverse()
     
-    # 2. Chuyển đổi sang CSV string
+    # 2. Xử lý dữ liệu sang JSON
     df = pd.DataFrame(items)
 
     df['car_count'] = df['car_count'].astype(float)
     
-    csv_data = df[['car_count', 'timestamp']].to_csv(index=False)
+    # Chọn cột cần thiết
+    df = df[['car_count', 'timestamp']]
+    
+    # --- TẠO JSON PAYLOAD ---
+    json_payload = df.to_json(orient='records', date_format='iso')
     
     last_timestamp = items[-1]['timestamp']
-
-    print(f"Đang gửi dữ liệu tới Endpoint: {ENDPOINT_NAME}")
+    print(f"Đang gửi JSON tới Endpoint: {ENDPOINT_NAME}")
 
     # 3. Gọi SageMaker Endpoint
     try:
         response = runtime.invoke_endpoint(
             EndpointName=ENDPOINT_NAME,
-            ContentType='text/csv',
-            Body=csv_data
+            ContentType='application/json',
+            Body=json_payload
         )
         result = json.loads(response['Body'].read().decode())
         
@@ -58,7 +61,7 @@ def lambda_handler(event, context):
         
         print(f"Kết quả: {pred_value} xe vào lúc {pred_time}")
 
-        # 4. Lưu kết quả
+        # 4. Lưu kết quả vào DynamoDB
         table_pred.put_item(
             Item={
                 'sensor_id': SENSOR_ID,
@@ -73,4 +76,6 @@ def lambda_handler(event, context):
 
     except Exception as e:
         print(f"Lỗi: {e}")
+        # In ra một phần payload để debug nếu lỗi
+        print(f"Payload mẫu (100 ký tự đầu): {json_payload[:100]}")
         raise e
