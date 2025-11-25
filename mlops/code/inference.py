@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # === Hằng số ===
 N_STEPS = 288
-FUTURE_STEP = 12 # Dự đoán 12*5 = 60 phút trong tương lai
+FUTURE_STEP = 12 
 TIME_STEP_MINUTES = 5
 
 def model_fn(model_dir):
@@ -18,7 +18,6 @@ def model_fn(model_dir):
     Hàm này được SageMaker gọi MỘT LẦN khi Endpoint khởi động.
     """
     print(f"Bắt đầu tải model từ thư mục: {model_dir}")
-    
     
     # Trỏ vào thư mục '1' chứa SavedModel
     model_path = os.path.join(model_dir, '1')
@@ -43,14 +42,33 @@ def model_fn(model_dir):
 
 def input_fn(request_body, request_content_type):
     """
-    Hàm này nhận dữ liệu thô từ Lambda (CSV đã được combine).
+    Hàm này nhận dữ liệu thô từ Lambda (CSV) và xử lý triệt để các lỗi kiểu dữ liệu.
     """
     if request_content_type == 'text/csv':
         try:
-            df = pd.read_csv(StringIO(request_body.decode('utf-8'))) # Decode bytes
-            print(f"Đã nhận và parse {len(df)} dòng dữ liệu CSV.")
+            # 1. Đọc CSV
+            df = pd.read_csv(StringIO(request_body.decode('utf-8')))
+            print(f"Đã nhận {len(df)} dòng dữ liệu.")
+
+            # 2. ÉP KIỂU DỮ LIỆU 
+            if 'car_count' in df.columns:
+                df['car_count'] = pd.to_numeric(df['car_count'], errors='coerce')
+                
+                df = df.dropna(subset=['car_count'])
+                
+                # Chuyển sang float32 (định dạng ưa thích của TensorFlow)
+                df['car_count'] = df['car_count'].astype('float32')
+            else:
+                raise ValueError("Lỗi: File CSV thiếu cột 'car_count'")
+            
+            # 3. Xử lý timestamp 
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
+
             return df
+            
         except Exception as e:
+            print(f"LỖI TRONG INPUT_FN: {e}")
             raise ValueError(f"Lỗi khi parse CSV: {e}")
     else:
         raise ValueError(f"Content type không được hỗ trợ: {request_content_type}")
@@ -60,8 +78,14 @@ def _preprocess_for_prediction(df, scaler_car, scaler_hour, n_steps=N_STEPS):
     Logic tiền xử lý (resample, scale, lấy N bước cuối).
     """
     print("Đang tiền xử lý dữ liệu (resample, scale, lấy bước cuối)...")
-    df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
-    df = df.sort_values('timestamp').set_index('timestamp')
+    
+    # Đảm bảo timestamp là index và đã được sort
+    if 'timestamp' in df.columns: # Nếu chưa set index
+         df = df.set_index('timestamp')
+    
+    df = df.sort_index()
+    
+    # Resample và Interpolate để điền dữ liệu thiếu
     df_resampled = df.resample(f'{TIME_STEP_MINUTES}T').mean().interpolate(method='time')
     
     df_resampled['hour'] = df_resampled.index.hour
@@ -100,12 +124,14 @@ def predict_fn(input_data_df, model_artifacts):
     print(f"Dự đoán (số lượng): {prediction}")
 
     # === 4. Tính toán Timestamp cho Dự đoán ===
-    try:
-        # Lấy timestamp cuối cùng từ dữ liệu gốc đã nhận
-        last_timestamp_str = input_data_df['timestamp'].iloc[-1]
-        last_timestamp = pd.to_datetime(last_timestamp_str, dayfirst=True)
-        
-        # Resample lần cuối để lấy mốc 5 phút cuối cùng (ví dụ: 09:01 -> 09:00)
+    try:        
+        # Lấy mốc thời gian cuối cùng trong dữ liệu đầu vào
+        if isinstance(input_data_df.index, pd.DatetimeIndex):
+             last_timestamp = input_data_df.index[-1]
+        else:
+             last_timestamp = input_data_df['timestamp'].iloc[-1]
+
+        # Resample lần cuối để lấy mốc 5 phút tròn (ví dụ: 09:01 -> 09:00)
         last_aligned_timestamp = pd.Timestamp(last_timestamp).floor(f'{TIME_STEP_MINUTES}T')
         
         # Tính thời gian tương lai
@@ -129,7 +155,7 @@ def predict_fn(input_data_df, model_artifacts):
 
 def output_fn(prediction_result, response_content_type):
     """
-    Hàm này định dạng kết quả trả về cho Lambda..
+    Hàm này định dạng kết quả trả về cho Lambda.
     """
     if response_content_type == 'application/json':
         return json.dumps(prediction_result)
