@@ -35,6 +35,8 @@ def lambda_handler(event, context):
     
     # 2. Chuyển đổi sang CSV string
     df = pd.DataFrame(items)
+
+    df['car_count'] = df['car_count'].astype(float)
     
     csv_data = df[['car_count', 'timestamp']].to_csv(index=False)
     
