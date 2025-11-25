@@ -56,7 +56,7 @@ def input_fn(request_body, request_content_type):
         # --- TRƯỜNG HỢP 2: CSV ---
         elif request_content_type == 'text/csv':
             df = pd.read_csv(StringIO(request_body.decode('utf-8')))
-            
+
         else:
             raise ValueError(f"Content type không được hỗ trợ: {request_content_type}")
 
@@ -65,6 +65,7 @@ def input_fn(request_body, request_content_type):
                 df['car_count'] = pd.to_numeric(df['car_count'], errors='coerce')
                 df = df.dropna(subset=['car_count'])
                 df['car_count'] = df['car_count'].astype('float32')
+                print("Debug dtypes sau khi xử lý:\n", df.dtypes)
             else:
                 raise ValueError("Dữ liệu thiếu cột 'car_count'")
             
