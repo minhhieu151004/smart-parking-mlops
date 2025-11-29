@@ -15,13 +15,13 @@ import logging
 import json
 from datetime import datetime
 import sys
-# Import thêm tensorflow
+import shutil
 import tensorflow as tf
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Các hàm preprocess_data và create_sequences ---
+# --- Các hàm preprocess_data và create_sequences giữ nguyên ---
 def preprocess_data(df):
     df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
     df.set_index('timestamp', inplace=True)
@@ -139,13 +139,9 @@ if __name__ == '__main__':
 
         logging.info(f"Saving model artifacts to {model_dir}")
 
-        # SageMaker TensorFlow Serving yêu cầu model được lưu ở định dạng SavedModel
-        # trong một thư mục con có tên là một số (ví dụ: '1')
+        # 1. Lưu model SavedModel
         export_path = os.path.join(model_dir, '1')
         logging.info(f"Saving model in SavedModel format to: {export_path}")
-
-        # Lưu model. KHÔNG thêm đuôi .keras.
-        # Lệnh này sẽ tự động tạo thư mục '1' với file 'saved_model.pb'
         best_model.save(export_path) 
         
         logging.info("Model in SavedModel format saved successfully.")
@@ -153,6 +149,7 @@ if __name__ == '__main__':
         # Xóa file checkpoint .h5 tạm thời
         os.remove(temp_model_file) 
 
+        # 2. Lưu Scaler
         scaler_car_path = os.path.join(model_dir, 'scaler_car_count.pkl')
         joblib.dump(scaler_car, scaler_car_path)
         logging.info(f"Scaler car saved to {scaler_car_path}")
@@ -161,6 +158,21 @@ if __name__ == '__main__':
         joblib.dump(scaler_hour, scaler_hour_path)
         logging.info(f"Scaler hour saved to {scaler_hour_path}")
 
+        # --- COPY INFERENCE CODE VÀO GÓI MODEL ---        
+        # Đường dẫn thư mục code (nằm ngay cạnh train_pipeline.py trong cùng folder mlops/)
+        source_dir = os.path.dirname(os.path.realpath(__file__)) 
+
+        INFERENCE_SCRIPT_PATH = os.path.join(source_dir, "code", "inference.py")
+        REQUIREMENTS_PATH = os.path.join(source_dir, "code", "requirements.txt")
+
+        # Copy file inference.py vào thư mục model output
+        shutil.copy(INFERENCE_SCRIPT_PATH, model_dir)
+        
+        # Copy file requirements.txt vào thư mục model output
+        shutil.copy(REQUIREMENTS_PATH, model_dir)
+        
+        logging.info("Code Inference và Requirements đã được đóng gói vào model.tar.gz.")
+        
         os.makedirs(output_dir, exist_ok=True)
         metrics_path = os.path.join(output_dir, 'metrics.json')
         with open(metrics_path, 'w') as f:
