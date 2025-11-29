@@ -113,8 +113,8 @@ model = TensorFlowModel(
     framework_version="2.14.1", 
     sagemaker_session=sagemaker_session,
     
-    #entry_point="inference.py",
-    #source_dir=CODE_DIR         
+    entry_point="inference.py",
+    source_dir=CODE_DIR         
 )
 
 model_metrics = ModelMetrics(
