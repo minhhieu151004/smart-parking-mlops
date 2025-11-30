@@ -147,7 +147,8 @@ if __name__ == '__main__':
         logging.info("Model in SavedModel format saved successfully.")
         
         # Xóa file checkpoint .h5 tạm thời
-        os.remove(temp_model_file) 
+        if os.path.exists(temp_model_file):
+            os.remove(temp_model_file) 
 
         # 2. Lưu Scaler
         scaler_car_path = os.path.join(model_dir, 'scaler_car_count.pkl')
@@ -158,21 +159,43 @@ if __name__ == '__main__':
         joblib.dump(scaler_hour, scaler_hour_path)
         logging.info(f"Scaler hour saved to {scaler_hour_path}")
 
-        # --- COPY INFERENCE CODE VÀO GÓI MODEL ---        
-        # Đường dẫn thư mục code (nằm ngay cạnh train_pipeline.py trong cùng folder mlops/)
-        source_dir = os.path.dirname(os.path.realpath(__file__)) 
-
+        # --- ✅ FIX: COPY INFERENCE CODE VÀO FOLDER code/ ---        
+        source_dir = os.path.dirname(os.path.realpath(__file__))
+        
         INFERENCE_SCRIPT_PATH = os.path.join(source_dir, "code", "inference.py")
         REQUIREMENTS_PATH = os.path.join(source_dir, "code", "requirements.txt")
-
-        # Copy file inference.py vào thư mục model output
-        shutil.copy(INFERENCE_SCRIPT_PATH, model_dir)
         
-        # Copy file requirements.txt vào thư mục model output
-        shutil.copy(REQUIREMENTS_PATH, model_dir)
+        # ✅ QUAN TRỌNG: Tạo thư mục code/ trong model_dir
+        code_output_dir = os.path.join(model_dir, "code")
+        os.makedirs(code_output_dir, exist_ok=True)
         
-        logging.info("Code Inference và Requirements đã được đóng gói vào model.tar.gz.")
+        # Copy inference.py và requirements.txt vào thư mục code/
+        if os.path.exists(INFERENCE_SCRIPT_PATH):
+            shutil.copy(INFERENCE_SCRIPT_PATH, os.path.join(code_output_dir, "inference.py"))
+            logging.info(f"✅ Copied inference.py to {code_output_dir}/inference.py")
+        else:
+            logging.error(f"❌ inference.py NOT FOUND at {INFERENCE_SCRIPT_PATH}")
+            raise FileNotFoundError(f"inference.py not found at {INFERENCE_SCRIPT_PATH}")
         
+        if os.path.exists(REQUIREMENTS_PATH):
+            shutil.copy(REQUIREMENTS_PATH, os.path.join(code_output_dir, "requirements.txt"))
+            logging.info(f"✅ Copied requirements.txt to {code_output_dir}/requirements.txt")
+        else:
+            logging.warning(f"⚠️ requirements.txt NOT FOUND at {REQUIREMENTS_PATH}")
+        
+        # Log cấu trúc thư mục để debug
+        logging.info("=" * 60)
+        logging.info("Model directory structure:")
+        for root, dirs, files in os.walk(model_dir):
+            level = root.replace(model_dir, '').count(os.sep)
+            indent = '  ' * level
+            logging.info(f"{indent}{os.path.basename(root)}/")
+            subindent = '  ' * (level + 1)
+            for file in files:
+                logging.info(f"{subindent}{file}")
+        logging.info("=" * 60)
+        
+        # Lưu metrics
         os.makedirs(output_dir, exist_ok=True)
         metrics_path = os.path.join(output_dir, 'metrics.json')
         with open(metrics_path, 'w') as f:
