@@ -19,7 +19,6 @@ TIME_STEP_MINUTES = 5
 
 
 # === WRAPPER CLASS (QUAN TRỌNG) ===
-# Chúng ta tạo class này để gói Model và Scaler đi chung với nhau
 class ModelHandler:
     def __init__(self, model, scaler_car, scaler_hour):
         self.model = model
@@ -46,8 +45,10 @@ def model_fn(model_dir):
     path_with_version = os.path.join(model_dir, "1")
     if os.path.exists(path_with_version):
         model_path = path_with_version
+        logger.info(f"Loading model from versioned path: {model_path}")
     else:
         model_path = model_dir  # Fallback nếu model nằm ngay root
+        logger.info(f"Loading model from root path: {model_path}")
 
     scaler_car_path = os.path.join(model_dir, "scaler_car_count.pkl")
     scaler_hour_path = os.path.join(model_dir, "scaler_hour.pkl")
@@ -55,21 +56,22 @@ def model_fn(model_dir):
     # Load Model
     try:
         model = tf.keras.models.load_model(model_path)
-        logger.info("Keras model loaded successfully.")
+        logger.info("✅ Keras model loaded successfully.")
     except Exception as e:
-        logger.error(f"Failed to load Keras model from {model_path}")
+        logger.error(f"❌ Failed to load Keras model from {model_path}: {e}")
         raise e
 
     # Load Scalers
     try:
         scaler_car = joblib.load(scaler_car_path)
         scaler_hour = joblib.load(scaler_hour_path)
-        logger.info("Scalers loaded successfully.")
+        logger.info("✅ Scalers loaded successfully.")
     except Exception as e:
-        logger.error(f"Failed to load scalers. Ensure .pkl files are in model.tar.gz")
+        logger.error(f"❌ Failed to load scalers from {model_dir}: {e}")
         raise e
 
     # Trả về object chứa TẤT CẢ mọi thứ cần thiết
+    logger.info("✅ ModelHandler created successfully")
     return ModelHandler(model, scaler_car, scaler_hour)
 
 
@@ -82,8 +84,13 @@ def input_fn(request_body, content_type):
     if content_type == "application/json":
         data = json.loads(request_body)
         df = pd.DataFrame(data)
+        
     elif content_type == "text/csv":
-        df = pd.read_csv(StringIO(request_body), sep=",")  # Sửa decode lỗi
+        # ✅ FIX: Handle bytes input
+        if isinstance(request_body, bytes):
+            request_body = request_body.decode('utf-8')
+        df = pd.read_csv(StringIO(request_body), sep=",")
+        
     else:
         raise ValueError(f"Unsupported content type: {content_type}")
 
@@ -102,6 +109,7 @@ def input_fn(request_body, content_type):
     if df.empty:
         raise ValueError("Dataframe is empty after preprocessing.")
 
+    logger.info(f"✅ Input processed successfully. Shape: {df.shape}")
     return df
 
 
@@ -125,8 +133,8 @@ def predict_fn(df, model_handler):
     # Resample
     try:
         df_resampled = df.resample(f"{TIME_STEP_MINUTES}T").mean().interpolate("time")
+        logger.info(f"Data resampled to {len(df_resampled)} rows")
     except ValueError as e:
-        # Xử lý lỗi nếu format thời gian không chuẩn cho resample
         logger.error(f"Resample failed: {e}")
         raise e
 
@@ -147,9 +155,12 @@ def predict_fn(df, model_handler):
     X = seq.reshape(1, N_STEPS, 2)
     last_timestamp = df_resampled.index[-1]
 
+    logger.info(f"Input sequence shape: {X.shape}")
+
     # --- Prediction ---
     try:
-        scaled_pred = model.predict(X)[0][0]
+        scaled_pred = model.predict(X, verbose=0)[0][0]
+        logger.info(f"Scaled prediction: {scaled_pred}")
     except Exception as e:
         logger.error(f"Error during model.predict: {e}")
         raise e
@@ -167,7 +178,7 @@ def predict_fn(df, model_handler):
         "for_timestamp": predicted_ts.strftime("%Y-%m-%d %H:%M:%S")
     }
 
-    logger.info(f"Prediction result: {response}")
+    logger.info(f"✅ Prediction result: {response}")
     return response
 
 
@@ -176,6 +187,7 @@ def predict_fn(df, model_handler):
 # ---------------------------------------------------------
 def output_fn(prediction, accept):
     logger.info(f"Formatting output for accept type: {accept}")
+    
     if accept == "application/json" or accept == "*/*":
         return json.dumps(prediction)
     else:
