@@ -12,8 +12,7 @@ from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.workflow.parameters import ParameterString, ParameterInteger
 from sagemaker.tensorflow import TensorFlow
 from sagemaker.workflow.properties import PropertyFile
-from sagemaker.model import Model
-from sagemaker.tensorflow.model import TensorFlowModel 
+from sagemaker.model import Model  # ✅ Dùng Model generic thay vì TensorFlowModel
 from sagemaker.workflow.model_step import ModelStep 
 from sagemaker.workflow.execution_variables import ExecutionVariables
 from sagemaker.workflow.functions import Join, JsonGet
@@ -21,11 +20,8 @@ from sagemaker.model_metrics import ModelMetrics, MetricsSource
 from sagemaker.workflow.pipeline_context import PipelineSession
 
 # --- 1. THÊM ĐOẠN NÀY ĐỂ LẤY ĐƯỜNG DẪN TUYỆT ĐỐI ---
-# Lấy đường dẫn của thư mục chứa file này (thư mục mlops/)
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
-# Đường dẫn đến thư mục chứa code inference (mlops/code/)
 CODE_DIR = os.path.join(BASE_DIR, "code") 
-# ---------------------------------------------------
 
 # --- Cấu hình ---
 pipeline_name = "SmartParkingMLOpsPipeline"
@@ -107,14 +103,34 @@ step_train_model = TrainingStep(
 )
 
 # --- (Bước 5: step_register_model) ---
-model = TensorFlowModel(
+# ✅ CRITICAL FIX: Dùng generic Model với TensorFlow container image
+# Thay vì TensorFlowModel (gây conflict giữa TF Serving và Python serving)
+
+# Lấy image URI cho TensorFlow inference container
+from sagemaker import image_uris
+tensorflow_image_uri = image_uris.retrieve(
+    framework="tensorflow",
+    region=aws_region,
+    version="2.14.1",
+    py_version="py310",
+    instance_type="ml.m5.large",
+    image_scope="inference"
+)
+
+model = Model(
+    image_uri=tensorflow_image_uri,
     model_data=step_train_model.properties.ModelArtifacts.S3ModelArtifacts,
     role=role,
-    framework_version="2.14.1", 
     sagemaker_session=sagemaker_session,
-    
     entry_point="inference.py",
-    source_dir=CODE_DIR         
+    source_dir=CODE_DIR,  # Chỉ định thư mục code/
+    name=None,  # SageMaker sẽ tự tạo tên
+    env={
+        'SAGEMAKER_PROGRAM': 'inference.py',
+        'SAGEMAKER_SUBMIT_DIRECTORY': '/opt/ml/model/code',
+        'SAGEMAKER_CONTAINER_LOG_LEVEL': '20',
+        'SAGEMAKER_REGION': aws_region
+    }
 )
 
 model_metrics = ModelMetrics(
@@ -127,9 +143,9 @@ model_metrics = ModelMetrics(
 step_register_model = ModelStep(
    name="RegisterModel",
    step_args=model.register(
-       content_types=["application/json"], 
+       content_types=["application/json", "text/csv"],
        response_types=["application/json"],
-       inference_instances=["ml.t2.medium"], 
+       inference_instances=["ml.t2.medium", "ml.m5.large"],
        model_package_group_name=model_package_group_name, 
        approval_status="PendingManualApproval", 
        model_metrics=model_metrics 
