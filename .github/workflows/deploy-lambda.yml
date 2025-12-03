@@ -9,11 +9,9 @@ on:
       - 'lambda/**'
 
 jobs:
-  # === JOB 1: Deploy Hàm Evaluate/Promote ===
   deploy-evaluate-lambda:
     name: Deploy Evaluate-Promote Lambda
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,17 +32,13 @@ jobs:
         run: |
           echo "Bắt đầu đóng gói hàm evaluate-promote-trigger..."
           mkdir package_eval
-          
           if [ -f lambda/evaluate-promote-trigger/requirements.txt ]; then
             pip install -r lambda/evaluate-promote-trigger/requirements.txt -t ./package_eval
           fi
-          
           cp lambda/evaluate-promote-trigger/lambda_function.py ./package_eval/
-          
           cd package_eval
           zip -r ../lambda-eval-deploy.zip .
           cd ..
-          echo "Đóng gói lambda-eval-deploy.zip hoàn tất."
 
       - name: Upload Package to S3 Staging
         run: |
@@ -92,7 +86,6 @@ jobs:
           cd package_pred
           zip -r ../lambda-pred-deploy.zip .
           cd ..
-          echo "Đóng gói lambda-pred-deploy.zip hoàn tất."
 
       - name: Upload Package to S3 Staging
         run: |
@@ -132,12 +125,7 @@ jobs:
           mkdir package_export
           
           if [ -f lambda/daily-export-to-s3/requirements.txt ]; then
-            pip install \
-              -r lambda/daily-export-to-s3/requirements.txt \
-              -t ./package_export \
-              --platform manylinux2014_x86_64 \
-              --only-binary=:all: \
-              --upgrade
+            pip install -r lambda/daily-export-to-s3/requirements.txt -t ./package_export
           fi
           
           cp lambda/daily-export-to-s3/lambda_function.py ./package_export/
