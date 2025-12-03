@@ -88,7 +88,7 @@ def _preprocess_and_scale(df, artifacts, n_steps=N_STEPS):
 
 def lambda_handler(event, context):
     try:
-        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU THÔ TỪ PI5 (API Gateway) ---
+        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU THÔ TỪ PI5 ---
         print("🔗 Đang xử lý HTTP POST từ Pi5...")
         
         # 1. Parse body 
