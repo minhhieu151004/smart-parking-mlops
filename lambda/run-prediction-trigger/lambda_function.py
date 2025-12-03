@@ -91,7 +91,7 @@ def lambda_handler(event, context):
         # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU THÔ TỪ PI5 (API Gateway) ---
         print("🔗 Đang xử lý HTTP POST từ Pi5...")
         
-        # 1. Parse body (Dữ liệu Pi gửi lên: {"car_count": 45, "timestamp": "dd/mm/yyyy HH:MM:SS"})
+        # 1. Parse body 
         request_data = json.loads(event['body'])
         pi_timestamp_str = request_data['timestamp']
         pi_car_count = request_data['car_count']
@@ -100,7 +100,7 @@ def lambda_handler(event, context):
         pi_timestamp_dt = datetime.strptime(pi_timestamp_str, '%d/%m/%Y %H:%M:%S')
         iso_timestamp = pi_timestamp_dt.isoformat()
         
-        # 3. Ghi dữ liệu Pi vừa gửi vào bảng Raw Data (DB Write 1)
+        # 3. Ghi dữ liệu Pi vừa gửi vào bảng Raw Data
         table_raw.put_item(
             Item={
                 'sensor_id': SENSOR_ID,
@@ -115,7 +115,7 @@ def lambda_handler(event, context):
         # Tải scalers
         artifacts = load_scalers_from_s3()
         
-        # 1. Lấy 288 dòng lịch sử (DB Read)
+        # 1. Lấy 288 dòng lịch sử 
         response = table_raw.query(
             KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID),
             Limit=N_STEPS, ScanIndexForward=False 
@@ -153,7 +153,7 @@ def lambda_handler(event, context):
         actual_pred_value = artifacts['scaler_car'].inverse_transform([[scaled_pred_value]])[0][0]
         final_prediction = int(round(actual_pred_value))
 
-        # 7. Lưu kết quả dự đoán (DB Write 2)
+        # 7. Lưu kết quả dự đoán 
         table_pred.put_item(
             Item={
                 'sensor_id': SENSOR_ID,
