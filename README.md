@@ -2,9 +2,13 @@
 
 **Đây là dự án xây dựng một hệ thống giám sát bãi đỗ xe thông minh phi máy chủ (Serverless), có khả năng dự đoán nhu cầu đỗ xe của người dùng trong tương lai và được tích hợp triển khai với các thành phần tự động hóa MLOps trên nền tảng AWS.**
 
+## **Luồng hoạt động mô hình Deep Learning**
+
+![Luồng hoạt động mô hình](images/model_flow.png)
+
 ## **Kiến trúc Hệ thống**
 
-![](images/system.png)
+![Kiến trúc hệ thống](images/system_architect.png)
 
 * **Data/Model Storage: Amazon S3**  
    * **Lưu trữ dữ liệu lịch sử đỗ xe và kết quả dự đoán từ endpoint.**   
@@ -24,8 +28,9 @@
    * **RegisterModel: Đăng ký model mới vào Model Registry với trạng thái PendingManualApproval.**
 
 * **Automation: AWS Lambda & EventBridge**
-   * **run-prediction-trigger (Lambda): Kích hoạt dự đoán khi có thay đổi trong "daily_actuals/".**
+   * **run-prediction-trigger (Lambda): Kích hoạt dự đoán khi có RaspberryPI gửi dữ liệu tới API Gateway".**
    * **evaluate-promote-trigger (Lambda): Kích hoạt đánh giá model khi có thay đổi trạng thái trong Model Registry (sau khi chạy pipeline).**
+   * **daily-export-to-s3 (Lambda): Tổng hợp dữ liệu từ DynamoDB lưu vào S3 để dễ quản lý".**
 
 * **Monitoring: Amazon CloudWatch**
    * **Giám sát logs, gửi cảnh báo.**
@@ -33,13 +38,14 @@
 ## **Các Luồng Hoạt Động (Workflows)**
 
 1. **Luồng Dự đoán Thời gian thực (Real-time Prediction).**
-   * **Raspberry PI gửi kết quả nhận diện, lưu trữ vào S3 "daily_actuals/".**
-   * **EventBridge kích hoạt hàm Lambda "run-prediction-trigger".**
-   * **Lambda gọi SageMaker Endpoint.**
-   * **Lưu kết quả dự đoán vào S3 và ứng dụng Web.**
+   * **Raspberry PI gửi kết quả nhận diện tới Gateway".**
+   * **API Gateway kích hoạt hàm Lambda "run-prediction-trigger".**
+   * **Lambda lưu trữ và lấy dữ liệu từ DynamoDB, gọi SageMaker Endpoint.**
+   * **Lưu kết quả dự đoán vào DynamoDB và hiển thị ứng dụng Web.**
 
 2. **Luồng Huấn luyện & Cập nhật Tự động (Automated Retraining).**
-   * **EventBridge Scheduler kích hoạt SageMaker Pipeline hằng ngày.**
+   * **EventBridge Scheduler kích hoạt SageMaker Pipeline hằng ngày, phát hiện drift và tự động retrain mô hình**
+   * **EventBridge Scheduler kích hoạt Lambda tổng hợp dữ liệu hằng ngày từ DynamoDB**
 
 3. **Workflow GitHub Action**
    * **Deploy Lambda: Cập nhật 2 Lambda functions khi có thay đổi trong thư mục "lambda/".**
