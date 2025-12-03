@@ -1,4 +1,4 @@
-# Workflow CI/CD : Tự động đóng gói và deploy CẢ HAI hàm Lambda lên AWS khi có push code vào thư mục 'lambda/'.
+# Workflow CI/CD : Tự động đóng gói và deploy CẢ BA hàm Lambda lên AWS.
 
 name: CI/CD - Deploy Lambda Functions
 
@@ -33,30 +33,29 @@ jobs:
       - name: Build and Package Lambda (Evaluate)
         run: |
           echo "Bắt đầu đóng gói hàm evaluate-promote-trigger..."
-          # 1. Tạo thư mục package (tên duy nhất)
           mkdir package_eval
           
-          # 2. Cài đặt thư viện từ requirements.txt (nếu file tồn tại)
           if [ -f lambda/evaluate-promote-trigger/requirements.txt ]; then
-            pip install \
-              -r lambda/evaluate-promote-trigger/requirements.txt \
-              -t ./package_eval
+            pip install -r lambda/evaluate-promote-trigger/requirements.txt -t ./package_eval
           fi
           
-          # 3. Copy code Python vào thư mục 'package_eval'
           cp lambda/evaluate-promote-trigger/lambda_function.py ./package_eval/
           
-          # 4. Nén (zip) toàn bộ nội dung của thư mục 'package_eval'
           cd package_eval
           zip -r ../lambda-eval-deploy.zip .
           cd ..
           echo "Đóng gói lambda-eval-deploy.zip hoàn tất."
 
+      - name: Upload Package to S3 Staging
+        run: |
+          aws s3 cp lambda-eval-deploy.zip s3://${{ secrets.S3_BUCKET_CODE_DEPLOY }}/lambda-deploy/evaluate/
+      
       - name: Deploy to AWS Lambda (Evaluate)
         run: |
           aws lambda update-function-code \
             --function-name evaluate-promote-trigger \
-            --zip-file fileb://lambda-eval-deploy.zip
+            --s3-bucket ${{ secrets.S3_BUCKET_CODE_DEPLOY }} \
+            --s3-key lambda-deploy/evaluate/lambda-eval-deploy.zip
 
   # === JOB 2: Deploy Hàm Run Prediction ===
   deploy-prediction-lambda:
@@ -82,32 +81,31 @@ jobs:
       - name: Build and Package Lambda (Prediction)
         run: |
           echo "Bắt đầu đóng gói hàm run-prediction-trigger..."
-          # Tạo thư mục package (tên duy nhất)
           mkdir package_pred
           
-          # Cài đặt thư viện (nếu file requirements.txt tồn tại - file này có thể trống)
           if [ -f lambda/run-prediction-trigger/requirements.txt ]; then
-            pip install \
-              -r lambda/run-prediction-trigger/requirements.txt \
-              -t ./package_pred
+            pip install -r lambda/run-prediction-trigger/requirements.txt -t ./package_pred
           fi
           
-          # Copy code Python
           cp lambda/run-prediction-trigger/lambda_function.py ./package_pred/
           
-          # Nén
           cd package_pred
           zip -r ../lambda-pred-deploy.zip .
           cd ..
           echo "Đóng gói lambda-pred-deploy.zip hoàn tất."
 
+      - name: Upload Package to S3 Staging
+        run: |
+          aws s3 cp lambda-pred-deploy.zip s3://${{ secrets.S3_BUCKET_CODE_DEPLOY }}/lambda-deploy/prediction/
+          
       - name: Deploy to AWS Lambda (Prediction)
         run: |
           aws lambda update-function-code \
             --function-name run-prediction-trigger \
-            --zip-file fileb://lambda-pred-deploy.zip
+            --s3-bucket ${{ secrets.S3_BUCKET_CODE_DEPLOY }} \
+            --s3-key lambda-deploy/prediction/lambda-pred-deploy.zip
 
-  # === JOB 3: Deploy Hàm Daily Export (MỚI) ===
+  # === JOB 3: Deploy Hàm Daily Export ===
   deploy-export-lambda:
     name: Deploy Daily Export Lambda
     runs-on: ubuntu-latest
@@ -142,17 +140,20 @@ jobs:
               --upgrade
           fi
           
-          # Copy code Python
           cp lambda/daily-export-to-s3/lambda_function.py ./package_export/
           
-          # 4. Nén
           cd package_export
           zip -r ../lambda-export-deploy.zip .
           cd ..
           echo "Đóng gói lambda-export-deploy.zip hoàn tất."
 
+      - name: Upload Package to S3 Staging
+        run: |
+          aws s3 cp lambda-export-deploy.zip s3://${{ secrets.S3_BUCKET_CODE_DEPLOY }}/lambda-deploy/export/
+      
       - name: Deploy to AWS Lambda (Export)
         run: |
           aws lambda update-function-code \
             --function-name daily-export-to-s3 \
-            --zip-file fileb://lambda-export-deploy.zip
+            --s3-bucket ${{ secrets.S3_BUCKET_CODE_DEPLOY }} \
+            --s3-key lambda-deploy/export/lambda-export-deploy.zip
