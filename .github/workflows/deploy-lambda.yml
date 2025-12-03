@@ -48,13 +48,13 @@ jobs:
 
       - name: Upload Package to S3 Staging
         run: |
-          aws s3 cp lambda-eval-deploy.zip s3://${{ secrets.S3_BUCKET_CODE_DEPLOY }}/lambda-deploy/evaluate/
+          aws s3 cp lambda-eval-deploy.zip s3://${{ secrets.S3_BUCKET }}/lambda-deploy/evaluate/
       
       - name: Deploy to AWS Lambda (Evaluate)
         run: |
           aws lambda update-function-code \
             --function-name evaluate-promote-trigger \
-            --s3-bucket ${{ secrets.S3_BUCKET_CODE_DEPLOY }} \
+            --s3-bucket ${{ secrets.S3_BUCKET }} \
             --s3-key lambda-deploy/evaluate/lambda-eval-deploy.zip
 
   # === JOB 2: Deploy Hàm Run Prediction ===
@@ -96,13 +96,13 @@ jobs:
 
       - name: Upload Package to S3 Staging
         run: |
-          aws s3 cp lambda-pred-deploy.zip s3://${{ secrets.S3_BUCKET_CODE_DEPLOY }}/lambda-deploy/prediction/
+          aws s3 cp lambda-pred-deploy.zip s3://${{ secrets.S3_BUCKET }}/lambda-deploy/prediction/
           
       - name: Deploy to AWS Lambda (Prediction)
         run: |
           aws lambda update-function-code \
             --function-name run-prediction-trigger \
-            --s3-bucket ${{ secrets.S3_BUCKET_CODE_DEPLOY }} \
+            --s3-bucket ${{ secrets.S3_BUCKET }} \
             --s3-key lambda-deploy/prediction/lambda-pred-deploy.zip
 
   # === JOB 3: Deploy Hàm Daily Export ===
@@ -149,11 +149,11 @@ jobs:
 
       - name: Upload Package to S3 Staging
         run: |
-          aws s3 cp lambda-export-deploy.zip s3://${{ secrets.S3_BUCKET_CODE_DEPLOY }}/lambda-deploy/export/
+          aws s3 cp lambda-export-deploy.zip s3://${{ secrets.S3_BUCKET }}/lambda-deploy/export/
       
       - name: Deploy to AWS Lambda (Export)
         run: |
           aws lambda update-function-code \
             --function-name daily-export-to-s3 \
-            --s3-bucket ${{ secrets.S3_BUCKET_CODE_DEPLOY }} \
+            --s3-bucket ${{ secrets.S3_BUCKET }} \
             --s3-key lambda-deploy/export/lambda-export-deploy.zip
