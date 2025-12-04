@@ -43,7 +43,7 @@ prediction_data_prefix = ParameterString(name="PredictionDataPrefix", default_va
 p_value_drift_threshold = ParameterString(name="PValueDriftThreshold", default_value="0.05")
 model_mae_drift_threshold = ParameterString(name="ModelMaeDriftThreshold", default_value="10.0")
 model_version = ExecutionVariables.PIPELINE_EXECUTION_ID
-training_epochs = ParameterInteger(name="TrainingEpochs", default_value=5)
+training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 
