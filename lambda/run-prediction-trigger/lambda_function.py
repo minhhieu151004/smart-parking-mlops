@@ -33,6 +33,9 @@ runtime = boto3.client('sagemaker-runtime')
 def _preprocess_and_scale(df, n_steps=N_STEPS):
     """Thực hiện toàn bộ logic tiền xử lý và SCALING thủ công."""
     
+    df = df[['car_count', 'timestamp']].copy() 
+
+    # 1. Ép kiểu  
     df['car_count'] = pd.to_numeric(df['car_count'], errors='coerce').astype(float)
     df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True, errors='coerce')
     df = df.dropna(subset=['car_count', 'timestamp'])
@@ -40,23 +43,22 @@ def _preprocess_and_scale(df, n_steps=N_STEPS):
     if len(df) < n_steps:
          raise ValueError(f"Không đủ dữ liệu, cần {n_steps} điểm.")
 
-    # 1. Resample và Interpolate (Lấp đầy khoảng trống thời gian)
+    # 2. Resample và Interpolate 
     df = df.set_index('timestamp').sort_index()
     df_resampled = df.resample(f'{TIME_STEP_MINUTES}T').mean().interpolate(method='time')
     
-    # 2. Feature Engineering và SCALING 
+    # 3. Feature Engineering và SCALING 
     df_resampled['hour'] = df_resampled.index.hour
     
     df_resampled['car_count_scaled'] = df_resampled['car_count'] / CAR_MAX
     df_resampled['hour_scaled'] = df_resampled['hour'] / HOUR_MAX
     
-    # 3. Tạo Sequence
+    # 4. Tạo Sequence
     sequence = df_resampled[['car_count_scaled', 'hour_scaled']].values[-n_steps:]
     last_valid_ts = df_resampled.index[-1]
     
-    # 4. Trả về mảng 3D chuẩn
+    # 5. Trả về mảng 3D chuẩn
     return sequence.reshape(1, n_steps, 2), last_valid_ts
-
 
 def lambda_handler(event, context):
     try:
