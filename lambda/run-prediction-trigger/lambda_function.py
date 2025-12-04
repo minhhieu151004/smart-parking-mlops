@@ -3,11 +3,9 @@ import json
 import os
 import pandas as pd
 import numpy as np
-import joblib
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
 from decimal import Decimal 
-import tempfile
 import sys
 
 # --- CẤU HÌNH ---
@@ -15,55 +13,26 @@ ENDPOINT_NAME = os.environ.get('SAGEMAKER_ENDPOINT_NAME')
 TABLE_RAW = 'SmartParkingRawData'
 TABLE_PRED = 'SmartParkingPredictions'
 SENSOR_ID = 'camera-01' 
-S3_BUCKET = os.environ.get('S3_BUCKET', 'kltn-smart-parking-data') 
 
-# --- ĐƯỜNG DẪN SCALER ---
-SCALER_PREFIX = 'models/production' 
-SCALER_KEY_CAR = f'{SCALER_PREFIX}/scaler_car_count.pkl' 
-SCALER_KEY_HOUR = f'{SCALER_PREFIX}/scaler_hour.pkl'
+CAR_MAX = 100.0
+HOUR_MAX = 24.0
 
 # Hằng số mô hình
 N_STEPS = 288 
 TIME_STEP_MINUTES = 5 
 PREDICTION_WINDOW_MINUTES = 60 
 
-# --- KHỞI TẠO GLOBAL & CACHING ---
-SCALER_ARTIFACTS = {} 
-
+# --- KHỞI TẠO GLOBAL ---
 dynamodb = boto3.resource('dynamodb')
 table_raw = dynamodb.Table(TABLE_RAW)
 table_pred = dynamodb.Table(TABLE_PRED)
 runtime = boto3.client('sagemaker-runtime')
-s3_client = boto3.client('s3')
 
-# --- HÀM TẢI SCALERS ---
-def load_scalers_from_s3():
-    """Tải scaler từ S3 và load chúng vào bộ nhớ."""
-    global SCALER_ARTIFACTS
-    
-    if SCALER_ARTIFACTS:
-        return SCALER_ARTIFACTS
-
-    temp_dir = tempfile.gettempdir()
-    local_car_path = os.path.join(temp_dir, 'scaler_car.pkl')
-    local_hour_path = os.path.join(temp_dir, 'scaler_hour.pkl')
-
-    try:
-        s3_client.download_file(S3_BUCKET, SCALER_KEY_CAR, local_car_path)
-        s3_client.download_file(S3_BUCKET, SCALER_KEY_HOUR, local_hour_path)
-        
-        SCALER_ARTIFACTS = {
-            'scaler_car': joblib.load(local_car_path),
-            'scaler_hour': joblib.load(local_car_path)
-        }
-        return SCALER_ARTIFACTS
-    
-    except Exception as e:
-        print(f"❌ LỖI NGHIÊM TRỌNG: Không thể tải hoặc load scalers từ S3. {e}")
-        raise RuntimeError("Missing model artifacts for scaling.")
 
 # --- HÀM TIỀN XỬ LÝ DỮ LIỆU ---
-def _preprocess_and_scale(df, artifacts, n_steps=N_STEPS):
+def _preprocess_and_scale(df, n_steps=N_STEPS):
+    """Thực hiện toàn bộ logic tiền xử lý và SCALING thủ công."""
+    
     df['car_count'] = pd.to_numeric(df['car_count'], errors='coerce').astype(float)
     df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True, errors='coerce')
     df = df.dropna(subset=['car_count', 'timestamp'])
@@ -71,49 +40,41 @@ def _preprocess_and_scale(df, artifacts, n_steps=N_STEPS):
     if len(df) < n_steps:
          raise ValueError(f"Không đủ dữ liệu, cần {n_steps} điểm.")
 
-    scaler_car = artifacts['scaler_car']
-    scaler_hour = artifacts['scaler_hour']
-
+    # 1. Resample và Interpolate (Lấp đầy khoảng trống thời gian)
     df = df.set_index('timestamp').sort_index()
     df_resampled = df.resample(f'{TIME_STEP_MINUTES}T').mean().interpolate(method='time')
     
+    # 2. Feature Engineering và SCALING 
     df_resampled['hour'] = df_resampled.index.hour
-    df_resampled['car_count_scaled'] = scaler_car.transform(df_resampled[['car_count']])
-    df_resampled['hour_scaled'] = scaler_hour.transform(df_resampled[['hour']])
     
+    df_resampled['car_count_scaled'] = df_resampled['car_count'] / CAR_MAX
+    df_resampled['hour_scaled'] = df_resampled['hour'] / HOUR_MAX
+    
+    # 3. Tạo Sequence
     sequence = df_resampled[['car_count_scaled', 'hour_scaled']].values[-n_steps:]
+    last_valid_ts = df_resampled.index[-1]
     
-    return sequence.reshape(1, n_steps, 2), df_resampled.index[-1]
+    # 4. Trả về mảng 3D chuẩn
+    return sequence.reshape(1, n_steps, 2), last_valid_ts
 
 
 def lambda_handler(event, context):
     try:
-        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU THÔ TỪ PI5 ---
-        print("🔗 Đang xử lý HTTP POST từ Pi5...")
+        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU THÔ TỪ PI5 & GHI DB ---
         
-        # 1. Parse body 
         request_data = json.loads(event['body'])
         pi_timestamp_str = request_data['timestamp']
         pi_car_count = request_data['car_count']
         
-        # 2. Chuẩn hóa Timestamp Pi gửi sang ISO để lưu DB
         pi_timestamp_dt = datetime.strptime(pi_timestamp_str, '%d/%m/%Y %H:%M:%S')
         iso_timestamp = pi_timestamp_dt.isoformat()
         
-        # 3. Ghi dữ liệu Pi vừa gửi vào bảng Raw Data
         table_raw.put_item(
-            Item={
-                'sensor_id': SENSOR_ID,
-                'timestamp': iso_timestamp,
-                'car_count': Decimal(str(pi_car_count)) 
-            }
+            Item={'sensor_id': SENSOR_ID, 'timestamp': iso_timestamp, 'car_count': Decimal(str(pi_car_count))}
         )
         print(f"✅ Ghi dữ liệu Pi vào DB thành công: {pi_car_count} xe.")
         
         # --- BƯỚC 2: LẤY LỊCH SỬ VÀ GỌI ENDPOINT ---
-        
-        # Tải scalers
-        artifacts = load_scalers_from_s3()
         
         # 1. Lấy 288 dòng lịch sử 
         response = table_raw.query(
@@ -123,37 +84,36 @@ def lambda_handler(event, context):
         items = response['Items']
         
         if len(items) < N_STEPS:
-            # Đây là lần khởi động hệ thống, chưa đủ 24h dữ liệu
             return {'statusCode': 202, 'body': json.dumps({"status": "COLD_START", "message": "Collecting more data..."})}
 
         items.reverse()
         df = pd.DataFrame(items)
         
         # 2. Tiền xử lý (Tạo Tensor chuẩn [1, 288, 2])
-        input_tensor, last_valid_ts = _preprocess_and_scale(df, artifacts) 
+        input_tensor, last_valid_ts = _preprocess_and_scale(df) 
         
-        # 3. Lấy Timestamp cho dự đoán
-        pred_ts = last_valid_ts.floor(f'{TIME_STEP_MINUTES}min') + timedelta(minutes=PREDICTION_WINDOW_MINUTES)
+        # 3. Tính Timestamp cho dự đoán
+        floored_ts = last_valid_ts.floor(f'{TIME_STEP_MINUTES}min') 
+        pred_ts = floored_ts + timedelta(minutes=PREDICTION_WINDOW_MINUTES)
         
         # 4. Gói vào format "instances"
         payload_data = {"instances": input_tensor.tolist()}
         json_payload = json.dumps(payload_data)
         
+        print(f"📤 Đang gửi Tensor 3D tới Endpoint: {ENDPOINT_NAME}")
+
         # 5. Gọi SageMaker Endpoint
         response = runtime.invoke_endpoint(
-            EndpointName=ENDPOINT_NAME,
-            ContentType='application/json',
-            Body=json_payload
+            EndpointName=ENDPOINT_NAME, ContentType='application/json', Body=json_payload
         )
-        
         result = json.loads(response['Body'].read().decode())
         
-        # 6. Hậu xử lý (Inverse Transform)
+        # 6. Hậu xử lý
         scaled_pred_value = result['predictions'][0][0] 
-        actual_pred_value = artifacts['scaler_car'].inverse_transform([[scaled_pred_value]])[0][0]
+        actual_pred_value = scaled_pred_value * CAR_MAX
         final_prediction = int(round(actual_pred_value))
 
-        # 7. Lưu kết quả dự đoán 
+        # 7. Lưu kết quả dự đoán
         table_pred.put_item(
             Item={
                 'sensor_id': SENSOR_ID,
@@ -164,7 +124,7 @@ def lambda_handler(event, context):
             }
         )
         
-        # --- BƯỚC 3: TRẢ VỀ PHẢN HỒI CHO PI5 ---
+        # 8. Trả về phản hồi cho Pi5
         return {
             'statusCode': 200,
             'headers': {'Content-Type': 'application/json'},
@@ -176,8 +136,4 @@ def lambda_handler(event, context):
 
     except Exception as e:
         print(f"❌ LỖI KHÔNG XỬ LÝ: {e}")
-        return {
-            'statusCode': 500,
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({"error": str(e)})
-        }
+        return {'statusCode': 500, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({"error": str(e)})}
