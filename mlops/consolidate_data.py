@@ -1,73 +1,56 @@
-import pandas as pd
-import boto3
-from io import StringIO
 import argparse
 import os
-from datetime import datetime, timedelta
+import pandas as pd
+import glob
 import logging
-import sys
 
-# Cấu hình logging
+# Cấu hình Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def consolidate(args):
-    """
-    Tải file baseline cũ và file actual của ngày hôm qua,
-    nối chúng lại, và lưu file baseline mới.
-    """
-    try:
-        s3 = boto3.client('s3')
-
-        # === 1. Tải Dữ liệu ===
-        # Tải file baseline (chứa dữ liệu đến hết hôm kia)
-        logging.info(f"Loading baseline data from s3://{args.baseline_bucket}/{args.baseline_key}...")
-        obj_baseline = s3.get_object(Bucket=args.baseline_bucket, Key=args.baseline_key)
-        df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
-
-        # Tải file actual (chỉ chứa dữ liệu hôm qua)
-        yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        actual_key = f"{args.actual_prefix}{yesterday_str}.csv"
-        
-        logging.info(f"Loading actual data from s3://{args.data_bucket}/{actual_key}...")
-        obj_actual = s3.get_object(Bucket=args.data_bucket, Key=actual_key)
-        df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
-        
-        logging.info("Data loaded successfully.")
-
-        # === 2. Nối (Append/Concat) Dữ liệu ===
-        logging.info(f"Appending yesterday's data ({len(df_actual)} rows) to baseline ({len(df_baseline)} rows)...")
-        
-        if df_actual.empty:
-            logging.warning("Actual data file is empty (seed run). Skipping concat.")
-            df_new_master = df_baseline
-        else:
-            df_new_master = pd.concat([df_baseline, df_actual], ignore_index=True)
-            
-        logging.info(f"New master file has {len(df_new_master)} rows.")
-
-        # === 3. Ghi kết quả ra Output Path của SageMaker ===
-        # SageMaker sẽ tự động upload file này lên S3 (ghi đè file baseline cũ)
-        output_path = os.path.join(args.output_path, 'parking_data.csv')
-        logging.info(f"Saving new master data to {output_path}")
-        df_new_master.to_csv(output_path, index=False)
-        logging.info("Consolidation complete.")
-
-    except Exception as e:
-        logging.error(f"Error during consolidation: {e}", exc_info=True)
-        raise
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # Các đường dẫn này do SageMaker Pipeline (build_pipeline.py) cung cấp
-    parser.add_argument('--baseline-data-uri', type=str, required=True)
-    parser.add_argument('--data-bucket', type=str, required=True)
-    parser.add_argument('--actual-prefix', type=str, required=True)
-    parser.add_argument('--output-path', type=str, required=True) # /opt/ml/processing/output_consolidated
+    # Tham số output quan trọng để gửi sang bước Train
+    parser.add_argument("--output-drift-data", type=str, default="/opt/ml/processing/drift_data")
+    
+    # Các tham số khác 
+    parser.add_argument("--baseline-data-uri", type=str, default="") 
+    parser.add_argument("--data-bucket", type=str, default="")
+    parser.add_argument("--actual-prefix", type=str, default="") 
+    parser.add_argument("--output-path", type=str, default="/opt/ml/processing/output")
     
     args = parser.parse_args()
-    
-    # Tách bucket và key từ baseline_data_uri
-    args.baseline_bucket = args.baseline_data_uri.split('/')[2]
-    args.baseline_key = '/'.join(args.baseline_data_uri.split('/')[3:])
 
-    consolidate(args)
+    logging.info("--- BẮT ĐẦU: TRÍCH XUẤT DỮ LIỆU DRIFT (FINE-TUNING) ---")
+    
+    # 1. Đường dẫn Input (Nơi SageMaker mount thư mục daily_actuals)
+    input_daily_dir = "/opt/ml/processing/input_daily"
+    
+    # 2. Tìm file CSV mới nhất (theo tên file YYYY-MM-DD.csv là sort được)
+    csv_files = glob.glob(os.path.join(input_daily_dir, "*.csv"))
+    
+    if not csv_files:
+        logging.error(f"❌ Lỗi: Không tìm thấy file dữ liệu nào trong {input_daily_dir}")
+        # Tạo file rỗng để Pipeline không bị crash, nhưng logic sau sẽ dừng
+        df_drift = pd.DataFrame(columns=['timestamp', 'car_count'])
+    else:
+        # Sắp xếp để lấy file mới nhất (ngày hôm qua/hôm nay)
+        latest_file = sorted(csv_files)[-1]
+        logging.info(f"📅 Phát hiện file dữ liệu mới nhất: {os.path.basename(latest_file)}")
+        
+        # 3. Đọc dữ liệu
+        df_drift = pd.read_csv(latest_file)
+        
+        # Xử lý format timestamp nếu cần (để khớp với train_pipeline)
+        if 'timestamp' in df_drift.columns:
+            df_drift['timestamp'] = pd.to_datetime(df_drift['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
+
+        logging.info(f"✅ Đã load {len(df_drift)} dòng dữ liệu để Fine-tune.")
+
+    # 4. Lưu file output (train.csv)
+    os.makedirs(args.output_drift_data, exist_ok=True)
+    drift_output_file = os.path.join(args.output_drift_data, "train.csv")
+    
+    df_drift.to_csv(drift_output_file, index=False)
+    logging.info(f"💾 Đã lưu file training vào: {drift_output_file}")
+
+    logging.info("--- HOÀN TẤT ---")
