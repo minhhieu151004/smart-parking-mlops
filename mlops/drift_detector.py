@@ -1,8 +1,7 @@
 import pandas as pd
 import boto3
 from io import StringIO
-from sklearn.metrics import mean_absolute_error # Dùng MAE
-from scipy.stats import ks_2samp # Vẫn dùng cho Data Drift
+from sklearn.metrics import mean_absolute_error
 import argparse
 import os
 from datetime import datetime, timedelta
@@ -10,132 +9,126 @@ import logging
 import json
 import sys
 
+# Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def align_dataframe_by_time(df, value_col):
     """
     Chuẩn hóa DataFrame về index 5 phút (00:00-23:55)
-    sử dụng resample và nội suy tuyến tính (linear interpolation).
+    sử dụng resample và nội suy tuyến tính.
     """
     # 1. Tạo index 24 giờ chuẩn (288 điểm)
     full_time_index = pd.date_range("00:00", "23:55", freq="5T").time
     
     if df.empty:
-        # Trả về một Series rỗng (NaN) với index chuẩn
         return pd.Series(index=full_time_index, dtype=float)
         
-    df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
+    # Đảm bảo timestamp là datetime
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True, errors='coerce')
+        df = df.dropna(subset=['timestamp'])
     
     # 2. Đặt timestamp làm index
     df.set_index('timestamp', inplace=True)
     
-    # 3. Resample (Lấy mẫu lại) về 5T (tạo ra các mốc 00:00, 00:05...)
-    #    Điều này tạo ra các `NaN` ở những nơi bị thiếu (ví dụ 1:05)
+    # 3. Resample về 5 phút
     profile_resampled = df[value_col].resample('5T').mean()
     
-    # 4. Nội suy (Interpolate) theo thời gian 
+    # 4. Nội suy (Interpolate)
     profile_interpolated = profile_resampled.interpolate(method='time')
     
-    # 5. Nhóm theo giờ trong ngày (nếu dữ liệu kéo dài nhiều ngày) và tính trung bình
+    # 5. Nhóm theo giờ trong ngày
     profile_grouped = profile_interpolated.groupby(profile_interpolated.index.time).mean()
     
-    # 6. Căn chỉnh (reindex) theo index chuẩn 288 điểm
+    # 6. Căn chỉnh theo index chuẩn
     profile_aligned = profile_grouped.reindex(full_time_index)
     
-    # 7. Lấp đầy các lỗ hổng còn lại (ví dụ 00:00 nếu Pi bắt đầu lúc 00:01)
+    # 7. Lấp đầy lỗ hổng
     profile_final = profile_aligned.ffill().bfill() 
     
     return profile_final
 
 def check_drift(args):
     """
-    Kiểm tra Data Drift (KS-Test) và Model Drift (Profile MAE với Nội suy).
+    CHỈ Kiểm tra Model Drift (Profile MAE).
+    Bỏ qua Data Drift (KS-Test).
     """
     try:
         s3 = boto3.client('s3')
 
-        # === 1. Tải Dữ liệu ===
-        logging.info(f"Loading baseline data from {args.baseline_data_uri}...")
-        obj_baseline = s3.get_object(Bucket=args.baseline_bucket, Key=args.baseline_key)
-        df_baseline = pd.read_csv(StringIO(obj_baseline['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
-
+        # === 1. Tải Dữ liệu Thực tế và Dự đoán ===
+        # Lấy ngày hôm qua (vì Drift check chạy đầu ngày hôm nay để check ngày hôm qua)
         yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
         actual_key = f"{args.actual_prefix}{yesterday_str}.csv"
         pred_key = f"{args.prediction_prefix}{yesterday_str}.csv"
         
+        # Tải Actuals
         logging.info(f"Loading actual data from s3://{args.data_bucket}/{actual_key}...")
-        obj_actual = s3.get_object(Bucket=args.data_bucket, Key=actual_key)
-        df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
-        
-        logging.info(f"Loading prediction data from s3://{args.data_bucket}/{pred_key}...")
-        obj_pred = s3.get_object(Bucket=args.data_bucket, Key=pred_key)
-        df_pred = pd.read_csv(StringIO(obj_pred['Body'].read().decode('utf-8')), parse_dates=['timestamp'], dayfirst=True)
-        
-        logging.info("All data loaded successfully.")
-
-        # === 2. Tính Data Drift (KS-Test) ===
-        logging.info("Calculating Data Drift (Baseline vs Actual) using KS-Test...")
-        
-        df_actual_data = df_actual['car_count'].dropna()
-        
-        if df_actual_data.empty:
-            logging.warning("Actual data file is empty (seed run). Forcing data drift detection.")
-            data_drift_detected = True
-            p_value = 0.0
-            ks_statistic = float('inf')
-        else:
-            ks_statistic, p_value = ks_2samp(df_baseline['car_count'].dropna(), df_actual_data)
-            data_drift_detected = p_value < args.p_value_threshold
-        
-        logging.info(f"Data Drift (KS-Test): KS Statistic={ks_statistic:.4f}, P-value={p_value:.4f}")
-        if data_drift_detected:
-            logging.warning(f"DATA DRIFT DETECTED (p-value {p_value:.4f} < {args.p_value_threshold}).")
-        else:
-            logging.info("No significant Data Drift detected.")
-
-        # === 3. Tính Model Drift (Actual vs Prediction MAE) ===
-        logging.info("Calculating Model Drift (Actual Profile vs Prediction Profile)...")
-        mae_model = float('inf') 
-        model_drift_detected = True 
-        
         try:
-            # Căn chỉnh và NỘI SUY dữ liệu thực tế và dự đoán
-            df_actual_aligned = align_dataframe_by_time(df_actual, 'car_count')
-            df_pred_aligned = align_dataframe_by_time(df_pred, 'predicted_car_count')
-            
-            # Kiểm tra nếu file trống (dẫn đến toàn NaN)
-            if df_actual_aligned.isnull().all() or df_pred_aligned.isnull().all():
-                logging.warning("Actual or Prediction data is completely empty (seed run). Assuming model drift.")
-                mae_model = float('inf')
-                model_drift_detected = True
-            else:
+            obj_actual = s3.get_object(Bucket=args.data_bucket, Key=actual_key)
+            df_actual = pd.read_csv(StringIO(obj_actual['Body'].read().decode('utf-8')))
+        except s3.exceptions.NoSuchKey:
+            logging.warning(f"Không tìm thấy file Actual: {actual_key}. Không thể tính MAE.")
+            df_actual = pd.DataFrame()
+
+        # Tải Predictions
+        logging.info(f"Loading prediction data from s3://{args.data_bucket}/{pred_key}...")
+        try:
+            obj_pred = s3.get_object(Bucket=args.data_bucket, Key=pred_key)
+            df_pred = pd.read_csv(StringIO(obj_pred['Body'].read().decode('utf-8')))
+        except s3.exceptions.NoSuchKey:
+            logging.warning(f"Không tìm thấy file Prediction: {pred_key}. Không thể tính MAE.")
+            df_pred = pd.DataFrame()
+        
+        logging.info("Data loading process completed.")
+
+        # === 2. Tính Model Drift (Actual vs Prediction MAE) ===
+        logging.info("Calculating Performance Drift (MAE)...")
+        mae_model = float('inf') 
+        model_drift_detected = False # Mặc định là False, chỉ True khi tính toán xong và vượt ngưỡng
+        
+        # Kiểm tra dữ liệu rỗng
+        if df_actual.empty or df_pred.empty:
+            logging.warning("Dữ liệu Actual hoặc Prediction bị thiếu/rỗng. Bỏ qua Drift Check (No Action).")
+            # Nếu thiếu dữ liệu, ta coi như không có drift để tránh retrain vô ích trên dữ liệu rỗng
+            model_drift_detected = False 
+        else:
+            try:
+                # Căn chỉnh và NỘI SUY
+                df_actual_aligned = align_dataframe_by_time(df_actual, 'car_count')
+                df_pred_aligned = align_dataframe_by_time(df_pred, 'prediction') 
+                
                 # Tính MAE trực tiếp
                 mae_model = mean_absolute_error(df_actual_aligned, df_pred_aligned)
-                model_drift_detected = mae_model > args.model_mae_threshold
+                
+                logging.info(f"Calculated MAE: {mae_model:.4f} (Threshold: {args.model_mae_threshold})")
+                
+                # QUYẾT ĐỊNH: Nếu sai số lớn hơn ngưỡng -> Drift
+                if mae_model > args.model_mae_threshold:
+                    model_drift_detected = True
+                    logging.warning(f"🔴 MODEL DRIFT DETECTED (MAE {mae_model:.4f} > {args.model_mae_threshold}).")
+                else:
+                    logging.info("🟢 Model Performance is good. No drift.")
 
-        except Exception as mae_error:
-            logging.error(f"Error during Model MAE calculation: {mae_error}. Assuming model drift.")
-            
-        logging.info(f"Model Drift (MAE): MAE = {mae_model:.4f}")
-        if model_drift_detected:
-            logging.warning(f"MODEL DRIFT DETECTED (MAE {mae_model:.4f} > {args.model_mae_threshold}).")
-        else:
-            logging.info("No significant Model Drift detected.")
+            except Exception as mae_error:
+                logging.error(f"Lỗi khi tính MAE: {mae_error}. Giả định không drift để an toàn.")
+                model_drift_detected = False
 
-        # === 4. Quyết định cuối cùng ===
-        final_drift_decision = data_drift_detected or model_drift_detected
+        # === 3. Kết quả cuối cùng ===
+        # Chỉ dựa vào Model Drift
+        final_drift_decision = model_drift_detected
+        
         if final_drift_decision:
-            logging.warning("FINAL DECISION: DRIFT DETECTED. Triggering retrain.")
+            logging.warning(">>> FINAL DECISION: TRIGGER RETRAINING <<<")
         else:
-            logging.info("FINAL DECISION: No drift detected.")
+            logging.info(">>> FINAL DECISION: SKIP RETRAINING <<<")
             
-        # Ghi kết quả
+        # Ghi kết quả JSON
         result_data = {
             "drift_detected": final_drift_decision,
             "data_drift": {
-                "detected": data_drift_detected,
-                "p_value": p_value, 
-                "ks_statistic": ks_statistic
+                "detected": False, # Luôn False vì ta không check nữa
+                "message": "Skipped by design (Performance-based trigger only)"
             },
             "model_drift": {
                 "detected": model_drift_detected,
@@ -146,23 +139,25 @@ def check_drift(args):
         }
 
         output_path = os.path.join(args.output_path, 'drift_check_result.json')
-        logging.info(f"Writing drift check result to {output_path}")
-        os.makedirs(args.output_path, exist_ok=True) # (Thêm os.makedirs để đảm bảo)
+        os.makedirs(args.output_path, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump(result_data, f, indent=4)
+            
+        logging.info(f"Result saved to {output_path}")
 
     except Exception as e:
-        logging.error(f"FATAL Error during drift check: {e}", exc_info=True) # (Thêm exc_info=True để log chi tiết)
-        result_data = { "error": str(e), "drift_detected": True } # (Buộc drift nếu có lỗi)
+        logging.error(f"FATAL Error during drift check: {e}", exc_info=True)
+        result_data = { "error": str(e), "drift_detected": False } 
         output_path = os.path.join(args.output_path, 'drift_check_result.json')
         os.makedirs(args.output_path, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump(result_data, f, indent=4)
-        raise
+        raise 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--baseline-data-uri', type=str, required=True)
+    parser.add_argument('--baseline-data-uri', type=str, default="") 
+    
     parser.add_argument('--data-bucket', type=str, required=True)
     parser.add_argument('--actual-prefix', type=str, required=True)
     parser.add_argument('--prediction-prefix', type=str, required=True)
@@ -174,7 +169,7 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    args.baseline_bucket = args.baseline_data_uri.split('/')[2]
-    args.baseline_key = '/'.join(args.baseline_data_uri.split('/')[3:])
+    args.baseline_bucket = ""
+    args.baseline_key = ""
 
     check_drift(args)
