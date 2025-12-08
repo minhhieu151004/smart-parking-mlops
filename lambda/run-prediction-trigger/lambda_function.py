@@ -33,6 +33,7 @@ runtime = boto3.client('sagemaker-runtime')
 def _preprocess_and_scale(df, n_steps=N_STEPS):
     """Thực hiện toàn bộ logic tiền xử lý và SCALING thủ công."""
     
+    # Lọc chỉ lấy các cột cần thiết cho Model, bỏ qua 'free_spots'
     df = df[['car_count', 'timestamp']].copy() 
 
     # 1. Ép kiểu  
@@ -62,19 +63,29 @@ def _preprocess_and_scale(df, n_steps=N_STEPS):
 
 def lambda_handler(event, context):
     try:
-        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU THÔ TỪ PI5 & GHI DB ---
+        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU TỪ PI5 & GHI DB ---
         
         request_data = json.loads(event['body'])
         pi_timestamp_str = request_data['timestamp']
         pi_car_count = request_data['car_count']
         
+        # [NEW] Lấy danh sách chỗ trống (mặc định list rỗng nếu không có)
+        pi_free_spots = request_data.get('free_spots', [])
+        
         pi_timestamp_dt = datetime.strptime(pi_timestamp_str, '%d/%m/%Y %H:%M:%S')
         iso_timestamp = pi_timestamp_dt.isoformat()
         
-        table_raw.put_item(
-            Item={'sensor_id': SENSOR_ID, 'timestamp': iso_timestamp, 'car_count': Decimal(str(pi_car_count))}
-        )
-        print(f"✅ Ghi dữ liệu Pi vào DB thành công: {pi_car_count} xe.")
+        # [UPDATE] Lưu thêm 'free_spots' vào DynamoDB
+        # DynamoDB hỗ trợ lưu List số nguyên trực tiếp
+        item_to_save = {
+            'sensor_id': SENSOR_ID, 
+            'timestamp': iso_timestamp, 
+            'car_count': Decimal(str(pi_car_count)),
+            'free_spots': pi_free_spots 
+        }
+
+        table_raw.put_item(Item=item_to_save)
+        print(f"✅ Ghi dữ liệu vào DB: {pi_car_count} xe, {len(pi_free_spots)} chỗ trống.")
         
         # --- BƯỚC 2: LẤY LỊCH SỬ VÀ GỌI ENDPOINT ---
         
@@ -92,6 +103,7 @@ def lambda_handler(event, context):
         df = pd.DataFrame(items)
         
         # 2. Tiền xử lý (Tạo Tensor chuẩn [1, 288, 2])
+        # Hàm này đã lọc bỏ cột 'free_spots' nên không gây lỗi
         input_tensor, last_valid_ts = _preprocess_and_scale(df) 
         
         # 3. Tính Timestamp cho dự đoán
@@ -132,7 +144,8 @@ def lambda_handler(event, context):
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
                 "prediction": final_prediction, 
-                "timestamp_for": pred_ts.strftime('%Y-%m-%d %H:%M:%S')
+                "timestamp_for": pred_ts.strftime('%Y-%m-%d %H:%M:%S'),
+                "message": "Data saved & Prediction success"
             })
         }
 
