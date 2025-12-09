@@ -1,149 +1,132 @@
 import boto3
 import pandas as pd
 import os
-import json
-from datetime import datetime, timedelta 
+import io
+from datetime import datetime, timedelta
 from boto3.dynamodb.conditions import Key
 from io import StringIO
-import io 
 
 # --- CẤU HÌNH ---
 BUCKET_NAME = os.environ.get('S3_BUCKET', 'kltn-smart-parking-data')
 SENSOR_ID = 'camera-01'
 TABLE_RAW = 'SmartParkingRawData'
 TABLE_PRED = 'SmartParkingPredictions'
+PREDICTION_WINDOW_MINUTES = 60  # Mô hình dự đoán trước 60'
 
 s3 = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 
-# --- HÀM 1: TRUY VẤN DYNAMODB ---
-def query_items_for_day(table_name, date_str):
-    """Truy vấn tất cả các mục từ DynamoDB cho một ngày cụ thể."""
+def query_items_by_range(table_name, start_time_str, end_time_str):
+    """Query DynamoDB theo khoảng thời gian tùy chỉnh."""
     table = dynamodb.Table(table_name)
-    start_of_day = f"{date_str}T00:00:00"
-    end_of_day = f"{date_str}T23:59:59"
     items = []
-    
     try:
-        print(f"   Querying {table_name} from {start_of_day} to {end_of_day}...")
+        print(f"   Querying {table_name}: {start_time_str} -> {end_time_str}")
         response = table.query(
-            KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID) & Key('timestamp').between(start_of_day, end_of_day)
+            KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID) & Key('timestamp').between(start_time_str, end_time_str)
         )
         items.extend(response['Items'])
         
         while 'LastEvaluatedKey' in response:
             response = table.query(
-                KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID) & Key('timestamp').between(start_of_day, end_of_day),
+                KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID) & Key('timestamp').between(start_time_str, end_time_str),
                 ExclusiveStartKey=response['LastEvaluatedKey']
             )
             items.extend(response['Items'])
-            
         return items
     except Exception as e:
-        print(f"Lỗi khi query bảng {table_name}: {e}")
+        print(f"Error querying {table_name}: {e}")
         return []
 
-
-# --- HÀM 2: LƯU TRỮ ARCHIVE ---
-def export_archive_to_s3(df, s3_folder, date_str):
-    """Lưu trữ dữ liệu hàng ngày (Actuals/Predictions) vào folder archive."""
+def export_archive_to_s3(df, s3_folder, target_date_str):
     if df.empty:
         return
-        
-    df = df.sort_values('timestamp')
-    
-    # Format lại timestamp
-    if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
 
-    if 'sensor_id' in df.columns: 
+    # Sắp xếp lại cho chuẩn
+    if 'timestamp' in df.columns:
+        df = df.sort_values('timestamp')
+        # Format lại timestamp
+        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
+        
+        # Nếu là file prediction, format luôn cột prediction_for
+        if 'prediction_for' in df.columns:
+             df['prediction_for'] = pd.to_datetime(df['prediction_for']).dt.strftime('%d/%m/%Y %H:%M:%S')
+
+    if 'sensor_id' in df.columns:
          df = df.drop(columns=['sensor_id'], errors='ignore')
 
-    if s3_folder == "daily_actuals":
-         cols = ['car_count', 'timestamp']
-         # Chỉ giữ lại các cột có trong df
-         valid_cols = [c for c in cols if c in df.columns]
-         df = df[valid_cols]
-    
+    # Lưu lên S3
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
     
-    s3_key = f"{s3_folder}/{date_str}.csv"
+    s3_key = f"{s3_folder}/{target_date_str}.csv"
     s3.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=csv_buffer.getvalue())
-    print(f"✅ Đã lưu file Archive: {s3_key}")
-
-
-# --- HÀM 3: NỐI VÀ GHI ĐÈ MASTER FILE ---
-def consolidate_master_file(s3_client, df_new_day):
-    """Tải file parking_data.csv gốc, nối dữ liệu mới và ghi đè."""
-    MASTER_KEY = "parking_data/parking_data.csv"
-    
-    # 1. Tải Master File 
-    try:
-        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=MASTER_KEY)
-        master_csv_string = response['Body'].read().decode('utf-8')
-        df_master = pd.read_csv(io.StringIO(master_csv_string), parse_dates=['timestamp'], dayfirst=True)
-        print(f"   Đã tải Master File: {len(df_master)} dòng.")
-    except s3_client.exceptions.NoSuchKey:
-        print("   Master file chưa tồn tại. Tạo file mới.")
-        df_master = pd.DataFrame() 
-
-    # 2. Chuẩn bị dữ liệu mới
-    cols_needed = ['timestamp', 'car_count']
-    valid_cols = [c for c in cols_needed if c in df_new_day.columns]
-    df_new = df_new_day[valid_cols].copy()
-    
-    # 3. Format timestamp thống nhất
-    df_new['timestamp'] = pd.to_datetime(df_new['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
-    if not df_master.empty:
-        df_master['timestamp'] = pd.to_datetime(df_master['timestamp'], dayfirst=True).dt.strftime('%d/%m/%Y %H:%M:%S')
-
-    # 4. Nối và Ghi đè
-    df_merged = pd.concat([df_master, df_new]).drop_duplicates(subset=['timestamp'], keep='last')
-    df_merged['temp_ts'] = pd.to_datetime(df_merged['timestamp'], dayfirst=True)
-    df_merged = df_merged.sort_values('temp_ts').drop(columns=['temp_ts'])
-    
-    csv_buffer = io.StringIO()
-    df_merged.to_csv(csv_buffer, index=False)
-    
-    s3_client.put_object(
-        Bucket=BUCKET_NAME,
-        Key=MASTER_KEY,
-        Body=csv_buffer.getvalue()
-    )
-    print(f"✅ Đã ghi đè Master File tổng: {len(df_merged)} dòng.")
-
+    print(f"✅ Đã lưu file {s3_key} ({len(df)} dòng)")
 
 # --- HÀM HANDLER ---
 def lambda_handler(event, context):
     now = datetime.now()
     
-    yesterday = now - timedelta(days=1)
-    target_date_str = yesterday.strftime('%Y-%m-%d')
+    # 1. Xác định ngày mục tiêu (Hôm qua)
+    target_date = (now - timedelta(days=1)).date()
+    target_date_str = target_date.strftime('%Y-%m-%d')
     
-    print(f"--- BẮT ĐẦU BACKUP DỮ LIỆU NGÀY HÔM QUA: {target_date_str} ---")
-    
-    # 1. TRUY VẤN DỮ LIỆU CẦN THIẾT 
-    raw_items = query_items_for_day(TABLE_RAW, target_date_str)
-    pred_items = query_items_for_day(TABLE_PRED, target_date_str)
+    print(f"--- BẮT ĐẦU TỔNG HỢP DỮ LIỆU CHO NGÀY: {target_date_str} ---")
 
-    if not raw_items:
-         print(f"⚠️ Không có dữ liệu Pi/thực tế nào ngày {target_date_str}. Kết thúc.")
-         return {"statusCode": 200, "body": f"No data for {target_date_str}"}
+    # ==============================================================================
+    # XỬ LÝ 1: RAW DATA (Dữ liệu thực tế) - Logic: Dựa vào timestamp (lúc gửi)
+    # ==============================================================================
+    # Raw data thì timestamp chính là thời điểm thực tế, nên query đúng ngày là được
+    raw_start = f"{target_date_str}T00:00:00"
+    raw_end = f"{target_date_str}T23:59:59"
     
-    # Chuyển raw items sang DataFrame
-    df_raw_yesterday = pd.DataFrame(raw_items)
+    raw_items = query_items_by_range(TABLE_RAW, raw_start, raw_end)
+    if raw_items:
+        df_raw = pd.DataFrame(raw_items)
+        # Lưu Actuals
+        export_archive_to_s3(df_raw, "daily_actuals", target_date_str)
+        # Gộp Master (Giả sử bạn đã có hàm consolidate_master_file ở trên)
+        # consolidate_master_file(s3, df_raw) 
+    else:
+        print(f"⚠️ Không có Raw Data cho ngày {target_date_str}")
+
+    # ==============================================================================
+    # XỬ LÝ 2: PREDICTIONS (Dữ liệu dự báo) - Logic: Dựa vào prediction_for
+    # ==============================================================================
+    # Để lấy đủ dự đoán CHO ngày 8/12, ta cần lấy các dự đoán được TẠO RA từ:
+    # 22:00 ngày 7/12 (dự đoán cho 23:00 -> 00:00 ngày 8/12)
+    # đến 23:00 ngày 8/12 (dự đoán cho 00:00 ngày 9/12 - cái này sẽ bị lọc bỏ sau)
     
-    # 2. TASK 3: MASTER CONSOLIDATION (Nối dữ liệu hôm qua vào Master File)
-    consolidate_master_file(s3, df_raw_yesterday)
+    # Mở rộng cửa sổ query lùi về quá khứ (Buffer thêm 2 tiếng cho chắc)
+    buffer_hours = 2 
+    query_start_dt = datetime.combine(target_date, datetime.min.time()) - timedelta(hours=buffer_hours)
+    query_end_dt = datetime.combine(target_date, datetime.max.time())
     
-    # 3. TASK 1: ARCHIVAL (Lưu file thực tế ngày hôm qua)
-    export_archive_to_s3(df_raw_yesterday, "daily_actuals", target_date_str)
+    pred_query_start = query_start_dt.isoformat()
+    pred_query_end = query_end_dt.isoformat()
     
-    # 4. TASK 2: ARCHIVAL (Lưu file dự đoán ngày hôm qua)
+    print(f"🔍 Quét bảng Prediction rộng hơn: từ {pred_query_start} đến {pred_query_end}")
+    pred_items = query_items_by_range(TABLE_PRED, pred_query_start, pred_query_end)
+
     if pred_items:
-        df_pred_yesterday = pd.DataFrame(pred_items)
-        export_archive_to_s3(df_pred_yesterday, "daily_predictions", target_date_str)
-    
-    print("--- HOÀN TẤT ARCHIVAL VÀ CONSOLIDATION ---")
-    return {"statusCode": 200, "body": f"Backup completed for {target_date_str}"}
+        df_pred = pd.DataFrame(pred_items)
+        
+        # --- LOGIC LỌC QUAN TRỌNG ---
+        # Chuyển đổi prediction_for sang datetime để so sánh
+        df_pred['prediction_for_dt'] = pd.to_datetime(df_pred['prediction_for'])
+        
+        # Chỉ giữ lại những dòng mà prediction_for thuộc đúng ngày mục tiêu
+        df_pred_filtered = df_pred[df_pred['prediction_for_dt'].dt.date == target_date].copy()
+        
+        print(f"   -> Tìm thấy {len(df_pred)} dự đoán trong khoảng query.")
+        print(f"   -> Sau khi lọc theo 'prediction_for' == {target_date_str}: Còn {len(df_pred_filtered)} dòng.")
+        
+        # Xóa cột tạm
+        df_pred_filtered = df_pred_filtered.drop(columns=['prediction_for_dt'])
+        
+        # Lưu file Archive
+        export_archive_to_s3(df_pred_filtered, "daily_predictions", target_date_str)
+    else:
+        print(f"⚠️ Không tìm thấy Prediction nào.")
+
+    return {"statusCode": 200, "body": "Success"}
