@@ -31,124 +31,143 @@ runtime = boto3.client('sagemaker-runtime')
 
 # --- HÀM TIỀN XỬ LÝ DỮ LIỆU ---
 def _preprocess_and_scale(df, n_steps=N_STEPS):
-    """Thực hiện toàn bộ logic tiền xử lý và SCALING thủ công."""
+    """
+    Thực hiện toàn bộ logic tiền xử lý và SCALING thủ công.
+    Chỉ giữ lại car_count và timestamp để đưa vào mô hình.
+    """
     
-    # Lọc chỉ lấy các cột cần thiết cho Model, bỏ qua 'free_spots'
+    # 1. Lọc chỉ lấy các cột cần thiết cho Model
     df = df[['car_count', 'timestamp']].copy() 
 
-    # 1. Ép kiểu  
+    # 2. Ép kiểu dữ liệu an toàn
     df['car_count'] = pd.to_numeric(df['car_count'], errors='coerce').astype(float)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True, errors='coerce')
+    
+    # Dữ liệu từ DynamoDB là ISO string (YYYY-MM-DD...), KHÔNG dùng dayfirst=True
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce') 
+    
     df = df.dropna(subset=['car_count', 'timestamp'])
     
+    # Kiểm tra độ dài dữ liệu
     if len(df) < n_steps:
-         raise ValueError(f"Không đủ dữ liệu, cần {n_steps} điểm.")
+         raise ValueError(f"Không đủ dữ liệu lịch sử, cần {n_steps} điểm, hiện có {len(df)}.")
 
-    # 2. Resample và Interpolate 
+    # 3. Resample và Interpolate
     df = df.set_index('timestamp').sort_index()
     df_resampled = df.resample(f'{TIME_STEP_MINUTES}T').mean().interpolate(method='time')
     
-    # 3. Feature Engineering và SCALING 
+    # 4. Feature Engineering và SCALING
     df_resampled['hour'] = df_resampled.index.hour
     
     df_resampled['car_count_scaled'] = df_resampled['car_count'] / CAR_MAX
     df_resampled['hour_scaled'] = df_resampled['hour'] / HOUR_MAX
     
-    # 4. Tạo Sequence
+    # 5. Tạo Sequence
     sequence = df_resampled[['car_count_scaled', 'hour_scaled']].values[-n_steps:]
     last_valid_ts = df_resampled.index[-1]
     
-    # 5. Trả về mảng 3D chuẩn
+    # 6. Trả về mảng 3D chuẩn
     return sequence.reshape(1, n_steps, 2), last_valid_ts
 
 def lambda_handler(event, context):
     try:
-        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU TỪ PI5 & GHI DB ---
+        # --- BƯỚC 1: TIẾP NHẬN DỮ LIỆU TỪ PI5 & GHI VÀO DB ---
         
         request_data = json.loads(event['body'])
         pi_timestamp_str = request_data['timestamp']
         pi_car_count = request_data['car_count']
         
-        # [NEW] Lấy danh sách chỗ trống (mặc định list rỗng nếu không có)
+        # Lấy danh sách chỗ trống
         pi_free_spots = request_data.get('free_spots', [])
         
+        # Chuyển đổi timestamp sang ISO format để lưu DB Raw
+        # Input Pi: "08/12/2025..." -> strptime -> ISO: "2025-12-08..."
         pi_timestamp_dt = datetime.strptime(pi_timestamp_str, '%d/%m/%Y %H:%M:%S')
         iso_timestamp = pi_timestamp_dt.isoformat()
         
-        # [UPDATE] Lưu thêm 'free_spots' vào DynamoDB
-        # DynamoDB hỗ trợ lưu List số nguyên trực tiếp
+        # Tạo Item để lưu vào DynamoDB
         item_to_save = {
             'sensor_id': SENSOR_ID, 
             'timestamp': iso_timestamp, 
             'car_count': Decimal(str(pi_car_count)),
-            'free_spots': pi_free_spots 
+            'free_spots': [int(x) for x in pi_free_spots] 
         }
 
+        # Thực hiện ghi Raw Data
         table_raw.put_item(Item=item_to_save)
-        print(f"✅ Ghi dữ liệu vào DB: {pi_car_count} xe, {len(pi_free_spots)} chỗ trống.")
+        print(f"✅ Đã ghi Raw Data: {pi_car_count} xe, Time: {iso_timestamp}")
         
-        # --- BƯỚC 2: LẤY LỊCH SỬ VÀ GỌI ENDPOINT ---
+        # --- BƯỚC 2: LẤY LỊCH SỬ VÀ GỌI SAGEMAKER ENDPOINT ---
         
-        # 1. Lấy 288 dòng lịch sử 
+        # 1. Query lấy 288 dòng dữ liệu lịch sử gần nhất
         response = table_raw.query(
             KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID),
-            Limit=N_STEPS, ScanIndexForward=False 
+            Limit=N_STEPS, 
+            ScanIndexForward=False 
         )
         items = response['Items']
         
         if len(items) < N_STEPS:
-            return {'statusCode': 202, 'body': json.dumps({"status": "COLD_START", "message": "Collecting more data..."})}
+            msg = f"COLD START: Đang thu thập dữ liệu ({len(items)}/{N_STEPS})..."
+            print(msg)
+            return {'statusCode': 202, 'body': json.dumps({"status": "COLD_START", "message": msg})}
 
         items.reverse()
         df = pd.DataFrame(items)
         
-        # 2. Tiền xử lý (Tạo Tensor chuẩn [1, 288, 2])
-        # Hàm này đã lọc bỏ cột 'free_spots' nên không gây lỗi
+        # 2. Tiền xử lý & Tạo Tensor
         input_tensor, last_valid_ts = _preprocess_and_scale(df) 
         
-        # 3. Tính Timestamp cho dự đoán
+        # 3. Tính Timestamp cho thời điểm dự đoán 
         floored_ts = last_valid_ts.floor(f'{TIME_STEP_MINUTES}min') 
         pred_ts = floored_ts + timedelta(minutes=PREDICTION_WINDOW_MINUTES)
         
-        # 4. Gói vào format "instances"
+        # 4. Gọi SageMaker Endpoint
         payload_data = {"instances": input_tensor.tolist()}
         json_payload = json.dumps(payload_data)
         
-        print(f"📤 Đang gửi Tensor 3D tới Endpoint: {ENDPOINT_NAME}")
-
-        # 5. Gọi SageMaker Endpoint
+        print(f"📤 Đang gọi Endpoint: {ENDPOINT_NAME}")
         response = runtime.invoke_endpoint(
-            EndpointName=ENDPOINT_NAME, ContentType='application/json', Body=json_payload
+            EndpointName=ENDPOINT_NAME, 
+            ContentType='application/json', 
+            Body=json_payload
         )
         result = json.loads(response['Body'].read().decode())
         
-        # 6. Hậu xử lý
+        # 5. Hậu xử lý
         scaled_pred_value = result['predictions'][0][0] 
         actual_pred_value = scaled_pred_value * CAR_MAX
         final_prediction = int(round(actual_pred_value))
 
-        # 7. Lưu kết quả dự đoán
+        # 6. Lưu kết quả dự đoán vào bảng Predictions
+        # last_valid_ts bây giờ sẽ đúng là tháng 12 nhờ sửa lỗi ở bước preprocess
+        pred_timestamp_iso = last_valid_ts.isoformat()
+        
         table_pred.put_item(
             Item={
                 'sensor_id': SENSOR_ID,
-                'timestamp': last_valid_ts.isoformat(),
+                'timestamp': pred_timestamp_iso, 
                 'prediction': final_prediction,
                 'prediction_for': pred_ts.isoformat(), 
                 'created_at': datetime.now().isoformat()
             }
         )
+        print(f"✅ Dự đoán thành công: {final_prediction} xe (Time: {pred_timestamp_iso})")
         
-        # 8. Trả về phản hồi cho Pi5
+        # 7. Trả về phản hồi
         return {
             'statusCode': 200,
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
                 "prediction": final_prediction, 
                 "timestamp_for": pred_ts.strftime('%Y-%m-%d %H:%M:%S'),
-                "message": "Data saved & Prediction success"
+                "message": "Success"
             })
         }
 
     except Exception as e:
-        print(f"❌ LỖI KHÔNG XỬ LÝ: {e}")
-        return {'statusCode': 500, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({"error": str(e)})}
+        print(f"❌ LỖI SYSTEM: {e}")
+        return {
+            'statusCode': 500, 
+            'headers': {'Content-Type': 'application/json'}, 
+            'body': json.dumps({"error": str(e)})
+        }
