@@ -42,7 +42,6 @@ def _preprocess_and_scale(df, n_steps=N_STEPS):
     # 2. Ép kiểu dữ liệu an toàn
     df['car_count'] = pd.to_numeric(df['car_count'], errors='coerce').astype(float)
     
-    # Dữ liệu từ DynamoDB là ISO string (YYYY-MM-DD...), KHÔNG dùng dayfirst=True
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce') 
     
     df = df.dropna(subset=['car_count', 'timestamp'])
@@ -139,7 +138,6 @@ def lambda_handler(event, context):
         final_prediction = int(round(actual_pred_value))
 
         # 6. Lưu kết quả dự đoán vào bảng Predictions
-        # last_valid_ts bây giờ sẽ đúng là tháng 12 nhờ sửa lỗi ở bước preprocess
         pred_timestamp_iso = last_valid_ts.isoformat()
         
         table_pred.put_item(

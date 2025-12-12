@@ -41,24 +41,19 @@ def consolidate_master_file(s3_client, df_new_day):
     """Tải file Master, nối dữ liệu mới và ghi đè."""
     MASTER_KEY = "parking_data/parking_data.csv"
     
-    # Chuẩn bị dữ liệu mới
     cols_needed = ['timestamp', 'car_count']
-    # Lọc cột
     valid_cols = [c for c in cols_needed if c in df_new_day.columns]
     df_new = df_new_day[valid_cols].copy()
-    
-    # Format timestamp của dữ liệu mới
-    df_new['timestamp'] = pd.to_datetime(df_new['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
 
     # 1. Tải Master File hiện tại
     try:
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=MASTER_KEY)
         master_csv_string = response['Body'].read().decode('utf-8')
-        # Đọc file Master (dayfirst=True vì nó lưu dd/mm/yyyy)
+        # Đọc file Master (Master lưu DD/MM/YYYY nên cần dayfirst=True)
         df_master = pd.read_csv(io.StringIO(master_csv_string), parse_dates=['timestamp'], dayfirst=True)
         print(f"   Đã tải Master File: {len(df_master)} dòng.")
         
-        # Format lại timestamp Master để thống nhất format string
+        # Format lại timestamp Master để thống nhất string
         df_master['timestamp'] = df_master['timestamp'].dt.strftime('%d/%m/%Y %H:%M:%S')
         
     except s3_client.exceptions.NoSuchKey:
@@ -66,14 +61,10 @@ def consolidate_master_file(s3_client, df_new_day):
         df_master = pd.DataFrame(columns=cols_needed)
 
     # 2. Nối và Ghi đè
-    # Nối: Master cũ + Dữ liệu mới
     df_merged = pd.concat([df_master, df_new])
-    
-    # Loại bỏ trùng lặp dựa trên timestamp (giữ cái mới nhất)
     df_merged = df_merged.drop_duplicates(subset=['timestamp'], keep='last')
     
-    # Sắp xếp lại theo thời gian
-    # Tạo cột tạm để sort đúng
+    # Sắp xếp lại (Tạo cột tạm datetime để sort)
     df_merged['temp_ts'] = pd.to_datetime(df_merged['timestamp'], dayfirst=True)
     df_merged = df_merged.sort_values('temp_ts').drop(columns=['temp_ts'])
     
@@ -89,48 +80,39 @@ def consolidate_master_file(s3_client, df_new_day):
     print(f"✅ Đã cập nhật Master File tổng: {len(df_merged)} dòng.")
 
 def export_archive_to_s3(df, s3_folder, target_date_str):
+    """Lưu trữ dữ liệu hàng ngày (Chỉ lưu, không format lại)."""
     if df.empty:
         return
 
-    # Sắp xếp lại cho chuẩn
-    if 'timestamp' in df.columns:
-        df = df.sort_values('timestamp')
-        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
-        
-        if 'prediction_for' in df.columns:
-             df['prediction_for'] = pd.to_datetime(df['prediction_for']).dt.strftime('%d/%m/%Y %H:%M:%S')
-
-    # Bỏ cột không cần thiết (sensor_id, free_spots...)
-    # Chỉ giữ lại các cột quan trọng
+    
+    # Chỉ giữ các cột quan trọng
     if s3_folder == "daily_actuals":
         keep_cols = ['timestamp', 'car_count']
     else:
-        # daily_predictions giữ lại prediction, prediction_for, timestamp (created_at)
         keep_cols = ['timestamp', 'prediction', 'prediction_for']
         
-    # Lọc cột an toàn
     final_cols = [c for c in keep_cols if c in df.columns]
-    df = df[final_cols]
+    df_to_save = df[final_cols].copy()
 
     # Lưu lên S3
     csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False)
+    df_to_save.to_csv(csv_buffer, index=False)
     
     s3_key = f"{s3_folder}/{target_date_str}.csv"
     s3.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=csv_buffer.getvalue())
-    print(f"✅ Đã lưu file Archive {s3_key}: {len(df)} dòng")
+    print(f"✅ Đã lưu file Archive {s3_key}: {len(df_to_save)} dòng")
 
 # --- HÀM HANDLER ---
 def lambda_handler(event, context):
     now = datetime.now()
-    
-    # 1. Xác định ngày mục tiêu (Hôm qua)
     target_date = (now - timedelta(days=1)).date()
     target_date_str = target_date.strftime('%Y-%m-%d')
     
     print(f"--- BẮT ĐẦU TỔNG HỢP DỮ LIỆU CHO NGÀY: {target_date_str} ---")
 
-    # XỬ LÝ 1: RAW DATA (ACTUALS)
+    # ==============================================================================
+    # 1. XỬ LÝ RAW DATA (ACTUALS)
+    # ==============================================================================
     raw_start = f"{target_date_str}T00:00:00"
     raw_end = f"{target_date_str}T23:59:59"
     
@@ -138,31 +120,36 @@ def lambda_handler(event, context):
     if raw_items:
         df_raw = pd.DataFrame(raw_items)
         
-        # TASK 1: Lưu file daily_actuals 
+        df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
+        
+        # TASK 1: Lưu file daily_actuals (Truyền df đã chuẩn)
         export_archive_to_s3(df_raw, "daily_actuals", target_date_str)
         
-        # TASK 3: Append vào Master File
+        # TASK 3: Append vào Master File (Truyền df đã chuẩn)
         consolidate_master_file(s3, df_raw)
         
     else:
         print(f"⚠️ Không có Raw Data cho ngày {target_date_str}")
 
-    # XỬ LÝ 2: PREDICTIONS
-    # Buffer 2 tiếng để lấy dự đoán vắt ngày
-    buffer_hours = 2
+    # ==============================================================================
+    # 2. XỬ LÝ PREDICTIONS
+    # ==============================================================================
+    buffer_hours = 3
     query_start_dt = datetime.combine(target_date, datetime.min.time()) - timedelta(hours=buffer_hours)
     query_end_dt = datetime.combine(target_date, datetime.max.time())
     
-    pred_query_start = query_start_dt.isoformat()
-    pred_query_end = query_end_dt.isoformat()
-    
-    pred_items = query_items_by_range(TABLE_PRED, pred_query_start, pred_query_end)
+    pred_items = query_items_by_range(TABLE_PRED, query_start_dt.isoformat(), query_end_dt.isoformat())
 
     if pred_items:
         df_pred = pd.DataFrame(pred_items)
         
-        # Lọc theo prediction_for
+        # 1. Timestamp (Lúc tạo)
+        df_pred['timestamp'] = pd.to_datetime(df_pred['timestamp']).dt.strftime('%d/%m/%Y %H:%M:%S')
         df_pred['prediction_for_dt'] = pd.to_datetime(df_pred['prediction_for'])
+        df_pred['prediction_for'] = df_pred['prediction_for_dt'].dt.strftime('%d/%m/%Y %H:%M:%S')
+        # --------------------------------------------------------
+        
+        # Lọc theo prediction_for (ngày mục tiêu)
         df_pred_filtered = df_pred[df_pred['prediction_for_dt'].dt.date == target_date].copy()
         
         # Xóa cột tạm
