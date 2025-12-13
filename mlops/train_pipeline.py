@@ -1,230 +1,159 @@
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.models import load_model, Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Conv1D, MaxPooling1D, Reshape, BatchNormalization
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.optimizers import Adam
-import joblib
-import boto3
-from io import StringIO, BytesIO
 import argparse
 import os
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Conv1D, MaxPooling1D, Reshape, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import logging
 import json
-from datetime import datetime
-import sys
 import shutil
-import tarfile # Cần thiết cho Warm Start
-import tensorflow as tf
+import sys
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Các hàm preprocess_data và create_sequences ---
-def preprocess_data(df):
-    df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
-    df.set_index('timestamp', inplace=True)
-    df = df.resample('5min').mean().interpolate()
-    df['car_count'] = df['car_count'].round().astype(int)
-    df = df.ffill().bfill()
-    df['hour'] = df.index.hour
-    scaler_car_count = MinMaxScaler()
-    df['car_count_scaled'] = scaler_car_count.fit_transform(df[['car_count']])
-    scaler_hour = MinMaxScaler()
-    df['hour_scaled'] = scaler_hour.fit_transform(df[['hour']])
-    return df, scaler_car_count, scaler_hour
-
-def create_sequences(df, n_steps=288, future_step=12):
-    car_count = df['car_count_scaled'].values
-    hour = df['hour_scaled'].values
-    X, y = [], []
-    for i in range(len(car_count) - n_steps - future_step):
-        X.append(np.column_stack((car_count[i:i + n_steps], hour[i:i + n_steps])))
-        y.append(car_count[i + n_steps + future_step])
-    return np.array(X), np.array(y)
-
-# --- HÀM TẢI MODEL CŨ TỪ S3 ---
-def download_and_extract_model(s3_uri, extract_path):
-    """Tải model.tar.gz từ S3 và giải nén."""
-    try:
-        logging.info(f"Đang tải model cũ từ: {s3_uri}")
-        s3 = boto3.client('s3')
+def build_model(input_shape):
+    """Xây dựng kiến trúc mô hình Hybrid (CNN-LSTM)."""
+    model = Sequential([
+        # --- CNN Block (Trích xuất đặc trưng không gian/cục bộ) ---
+        Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=input_shape, padding='same'),
+        BatchNormalization(),
+        MaxPooling1D(pool_size=2),
         
-        # Parse S3 URI (s3://bucket/key)
-        bucket_name = s3_uri.split('/')[2]
-        key = '/'.join(s3_uri.split('/')[3:])
+        Conv1D(filters=128, kernel_size=3, activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling1D(pool_size=2),
         
-        local_tar_path = '/tmp/old_model.tar.gz'
-        s3.download_file(bucket_name, key, local_tar_path)
+        # Reshape để đưa vào LSTM (Time steps giảm do Pooling)
+        Reshape((-1, 128)),
         
-        logging.info("Đang giải nén model cũ...")
-        with tarfile.open(local_tar_path, 'r:gz') as tar:
-            tar.extractall(path=extract_path)
-            
-        logging.info(f"Đã giải nén model cũ vào {extract_path}")
-        return True
-    except Exception as e:
-        logging.error(f"Lỗi khi tải model cũ: {e}")
-        return False
+        # --- LSTM Block (Học phụ thuộc chuỗi thời gian dài) ---
+        LSTM(units=150, return_sequences=True),
+        Dropout(0.3),
+        LSTM(units=100),
+        Dropout(0.3),
+        
+        # --- Output Layer ---
+        Dense(units=50, activation='relu'),
+        Dense(units=1, activation='sigmoid')
+    ])
+    return model
 
-# --- Hàm chính ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # --- Hyperparameters ---
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--learning-rate', type=float, default=0.001)
-    parser.add_argument('--n-steps', type=int, default=288)
-    parser.add_argument('--future-step', type=int, default=12)
-    parser.add_argument('--model-version', type=str, required=True)
+    parser.add_argument('--batch-size', type=int, default=64)
     
-    # --- THAM SỐ WARM START MỚI ---
-    parser.add_argument('--warm-start-model-uri', type=str, default=None) 
-    # ------------------------------
-
-    parser.add_argument('--model_dir', type=str, default=os.environ.get('SM_MODEL_DIR', '/opt/ml/model'))
-    input_data_path = os.environ.get('SM_CHANNEL_TRAINING', '/opt/ml/input/data/training')
-    model_dir = os.environ.get('SM_MODEL_DIR', '/opt/ml/model')
-    output_dir = os.environ.get('SM_OUTPUT_DATA_DIR', '/opt/ml/output/data')
-
+    # SageMaker Paths (Tự động mount bởi SageMaker)
+    parser.add_argument('--model-dir', type=str, default=os.environ.get('SM_MODEL_DIR', '/opt/ml/model'))
+    parser.add_argument('--train', type=str, default=os.environ.get('SM_CHANNEL_TRAIN', '/opt/ml/input/data/train'))
+    
     args = parser.parse_args()
 
-    logging.info(f"--- BẮT ĐẦU HUẤN LUYỆN (Version: {args.model_version}) ---")
+    logging.info("--- BẮT ĐẦU TRAINING (RETRAIN FROM SCRATCH) ---")
     
     try:
-        # 1. Load Data 
-        data_file_path = os.path.join(input_data_path, 'parking_data.csv') 
-        if not os.path.exists(data_file_path):
-            # Nếu input là thư mục, lấy file csv đầu tiên
-            csv_files = [f for f in os.listdir(input_data_path) if f.endswith('.csv')]
-            if csv_files:
-                 data_file_path = os.path.join(input_data_path, csv_files[0])
-            else:
-                 data_file_path = input_data_path # Fallback
-
-        logging.info(f"Reading data from {data_file_path}")
-        df = pd.read_csv(data_file_path, parse_dates=['timestamp'], dayfirst=True)
+        # 1. LOAD DỮ LIỆU ĐÃ PREPROCESS
+        data_path = os.path.join(args.train, 'train_data.npy')
         
-        # 2. Preprocess
-        df_processed, scaler_car, scaler_hour = preprocess_data(df)
-        
-        if df_processed.empty or len(df_processed) < (args.n_steps + args.future_step):
-            raise ValueError(f"Không đủ dữ liệu. Cần ít nhất {args.n_steps + args.future_step} dòng.")
-
-        X, y = create_sequences(df_processed, n_steps=args.n_steps, future_step=args.future_step)
-        
-        if X.shape[0] == 0:
-            raise ValueError("Dữ liệu quá ngắn để tạo sequence.")
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"❌ Không tìm thấy file dữ liệu: {data_path}")
             
-        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+        logging.info(f"📂 Đang tải dữ liệu từ {data_path}...")
+        # Load dictionary chứa X và y
+        data = np.load(data_path, allow_pickle=True).item()
+        X_all = data['X']
+        y_all = data['y']
         
-        # 3. Build Model (Khởi tạo kiến trúc)
-        model = Sequential([
-            Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(X.shape[1], X.shape[2]), padding='same'),
-            BatchNormalization(), MaxPooling1D(pool_size=2),
-            Conv1D(filters=128, kernel_size=3, activation='relu', padding='same'),
-            BatchNormalization(), MaxPooling1D(pool_size=2),
-            Reshape((-1, 128)),
-            LSTM(units=150, return_sequences=True), Dropout(0.4),
-            LSTM(units=100), Dropout(0.4),
-            Dense(units=50, activation='relu'),
-            Dense(units=1, activation='sigmoid')
-        ])
+        logging.info(f"📦 Tổng dữ liệu: X shape: {X_all.shape}, y shape: {y_all.shape}")
+        
+        # 2. CHIA DATA TRAIN/VAL
+        # Đưa dữ liệu mới nhất (Drift) vào tập Train.
+        # Valid: Lấy 10% dữ liệu nằm trước đoạn mới nhất.
+        
+        total_len = len(X_all)
+        valid_len = int(total_len * 0.1) # 10% Validation
+        
+        # Đoạn Valid: Từ 80% -> 90% (Chừa lại 10% cuối cùng cho Train)
+        valid_start = int(total_len * 0.8)
+        valid_end = int(total_len * 0.9)
+        
+        # Tách Validation
+        X_val = X_all[valid_start : valid_end]
+        y_val = y_all[valid_start : valid_end]
+        
+        # Tách Training: (Đầu -> 80%) + (90% -> Cuối)
+        # np.concatenate giúp nối 2 phần lại
+        X_train = np.concatenate((X_all[:valid_start], X_all[valid_end:]), axis=0)
+        y_train = np.concatenate((y_all[:valid_start], y_all[valid_end:]), axis=0)
+        
+        logging.info(f"   -> Train size: {len(X_train)} (Gồm 10% dữ liệu mới nhất)")
+        logging.info(f"   -> Valid size: {len(X_val)}")
+
+        # 3. BUILD MODEL & TRAINING
+        input_shape = (X_train.shape[1], X_train.shape[2]) # (288, 2)
+        model = build_model(input_shape)
+        
         model.compile(optimizer=Adam(learning_rate=args.learning_rate), loss='mean_squared_error')
-        logging.info("Model architecture built.")
+        logging.info("✅ Kiến trúc Model đã được khởi tạo.")
 
-        # 4. --- LOGIC WARM START (FINE-TUNING) ---
-        epochs_to_run = args.epochs
+        # Checkpoint: Chỉ lưu model có val_loss tốt nhất
+        checkpoint_path = os.path.join(args.model_dir, 'best_model_checkpoint.h5')
         
-        if args.warm_start_model_uri and args.warm_start_model_uri != "None":
-            logging.info(">>> PHÁT HIỆN YÊU CẦU WARM START <<<")
-            old_model_dir = "/tmp/old_model"
-            
-            if download_and_extract_model(args.warm_start_model_uri, old_model_dir):
-                # Model SavedModel nằm trong thư mục con '1' (theo chuẩn của chúng ta)
-                old_saved_model_path = os.path.join(old_model_dir, "1")
-                
-                try:
-                    logging.info(f"Loading weights từ {old_saved_model_path}...")
-                    old_model = load_model(old_saved_model_path)
-                    
-                    # Chép trọng số từ model cũ sang model mới
-                    model.set_weights(old_model.get_weights())
-                    logging.info("✅ Đã nạp thành công trọng số từ model cũ.")
-                    
-                    # Giảm số epochs xuống còn 2 để tránh catastrophic forgetting
-                    epochs_to_run = 2
-                    logging.info(f"Chuyển sang chế độ Fine-tuning: Giảm epochs xuống {epochs_to_run}")
-                    
-                except Exception as load_err:
-                    logging.error(f"Lỗi khi load model cũ: {load_err}. Sẽ train từ đầu.")
-            else:
-                 logging.warning("Không tải được model cũ. Sẽ train từ đầu.")
-        else:
-            logging.info("Training from scratch (Huấn luyện từ đầu).")
-        # ----------------------------------------
+        callbacks = [
+            ModelCheckpoint(checkpoint_path, monitor='val_loss', save_best_only=True, verbose=1),
+            EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+        ]
 
-        # 5. Training
-        temp_model_file = 'best_model_temp.h5'
-        checkpoint = ModelCheckpoint(temp_model_file, monitor='val_loss', save_best_only=True)
-        early_stopping = EarlyStopping(monitor='val_loss', patience=10)
-
+        logging.info("🚀 Bắt đầu quá trình Fit...")
         history = model.fit(
-            X_train, y_train, epochs=epochs_to_run, batch_size=64,
-            validation_data=(X_val, y_val), callbacks=[checkpoint, early_stopping], verbose=2
+            X_train, y_train,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            validation_data=(X_val, y_val),
+            callbacks=callbacks,
+            verbose=2
         )
         
-        # Load best weights
-        best_model = load_model(temp_model_file)
-        val_loss = best_model.evaluate(X_val, y_val, verbose=0)
+        # 4. LƯU ARTIFACTS (CHO INFERENCE)
+        logging.info(f"💾 Đang lưu model artifacts vào {args.model_dir}...")
+
+        # A. Lưu Model Format SavedModel (Standard cho TF Serving/SageMaker)
+        export_path = os.path.join(args.model_dir, '1')
+        model.save(export_path) 
+        logging.info(f"✅ Đã lưu TensorFlow SavedModel vào {export_path}")
         
-        # 6. Save Artifacts
-        logging.info(f"Saving model artifacts to {model_dir}")
-
-        # Lưu model SavedModel (Folder '1')
-        export_path = os.path.join(model_dir, '1')
-        best_model.save(export_path) 
+        # B. Lưu Metrics Training
+        final_train_loss = history.history['loss'][-1]
+        final_val_loss = history.history['val_loss'][-1]
         
-        if os.path.exists(temp_model_file): os.remove(temp_model_file) 
-
-        # Lưu Scalers
-        joblib.dump(scaler_car, os.path.join(model_dir, 'scaler_car_count.pkl'))
-        joblib.dump(scaler_hour, os.path.join(model_dir, 'scaler_hour.pkl'))
-
-        # --- COPY INFERENCE CODE ---
-        source_dir = os.path.dirname(os.path.realpath(__file__))
-        code_output_dir = os.path.join(model_dir, "code") # Tạo thư mục code/ bên trong model
+        # C. COPY INFERENCE CODE 
+        # SageMaker Endpoint cần file inference.py để biết cách xử lý input/output
+        current_dir = os.path.dirname(os.path.realpath(__file__))
+        code_output_dir = os.path.join(args.model_dir, "code")
         os.makedirs(code_output_dir, exist_ok=True)
         
-        INFERENCE_SCRIPT = os.path.join(source_dir, "code", "inference.py")
-        REQUIREMENTS_FILE = os.path.join(source_dir, "code", "requirements.txt")
+        # Các file nguồn nằm cùng thư mục với script này
+        inference_src = os.path.join(current_dir, "inference.py") 
+        requirements_src = os.path.join(current_dir, "requirements.txt")
         
-        if os.path.exists(INFERENCE_SCRIPT):
-            shutil.copy(INFERENCE_SCRIPT, os.path.join(code_output_dir, "inference.py"))
-            logging.info("✅ Copied inference.py")
-            
-        if os.path.exists(REQUIREMENTS_FILE):
-            shutil.copy(REQUIREMENTS_FILE, os.path.join(code_output_dir, "requirements.txt"))
-            logging.info("✅ Copied requirements.txt")
-        # ------------------------------------------
-        
-        # Lưu Metrics
-        os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
-            json.dump({
-                'val_loss': val_loss,
-                'training_loss': history.history['loss'][-1], 
-                'model_version': args.model_version
-            }, f, indent=4)
+        if os.path.exists(inference_src):
+            shutil.copy(inference_src, os.path.join(code_output_dir, "inference.py"))
+            logging.info("✅ Đã copy inference.py")
+        else:
+            logging.warning("⚠️ CẢNH BÁO: Không tìm thấy inference.py! Endpoint có thể bị lỗi.")
 
-        logging.info("--- TRAINING HOÀN TẤT ---")
+        if os.path.exists(requirements_src):
+            shutil.copy(requirements_src, os.path.join(code_output_dir, "requirements.txt"))
+            logging.info("✅ Đã copy requirements.txt")
+
+        logging.info("--- TRAINING HOÀN TẤT THÀNH CÔNG ---")
 
     except Exception as e:
-        logging.error(f"Critical Error: {e}", exc_info=True)
-        # Ghi file lỗi để debug
-        os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, 'failure_reason.txt'), 'w') as f:
-            f.write(str(e))
+        logging.error(f"❌ Training Thất Bại: {e}", exc_info=True)
         sys.exit(1)
