@@ -1,13 +1,15 @@
-import json
-import os
-import tarfile
+#!/usr/bin/env python3
 import argparse
+import os
+import json
 import logging
-import shutil
-import pandas as pd
-import numpy as np
-import tensorflow as tf
+import tarfile
+import glob
 import joblib
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import boto3
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 # Cấu hình Logging
@@ -17,8 +19,8 @@ logger = logging.getLogger()
 # --- CẤU HÌNH ---
 N_STEPS = 288           # Độ dài chuỗi đầu vào (24h)
 TIME_STEP_MINUTES = 5   # Bước thời gian
-FUTURE_STEP = 12        # Dự đoán cho 60 phút sau (12 bước * 5p)
-CAR_MAX = 100.0         # Dùng để Inverse Scaling thủ công 
+FUTURE_STEP = 12        # Dự đoán cho 60 phút sau
+OLD_MODEL_DIR = "/tmp/old_model" # Thư mục tạm để tải model cũ
 
 def extract_model_artifact(model_tar_path, extract_dir):
     """Giải nén model.tar.gz ra thư mục đích"""
@@ -35,11 +37,55 @@ def extract_model_artifact(model_tar_path, extract_dir):
         logger.error(f"Lỗi giải nén: {e}")
         return False
 
+def get_latest_approved_model_artifact(sm_client, model_package_group_name):
+    """Tìm và trả về S3 URI của model Approved mới nhất từ Registry."""
+    try:
+        # Lấy danh sách model package
+        response = sm_client.list_model_packages(
+            ModelPackageGroupName=model_package_group_name,
+            ModelApprovalStatus='Approved',
+            SortBy='CreationTime',
+            SortOrder='Descending'
+        )
+        
+        packages = response.get('ModelPackageSummaryList', [])
+        if not packages:
+            return None
+            
+        # Lấy cái mới nhất
+        latest_pkg = packages[0]
+        pkg_arn = latest_pkg['ModelPackageArn']
+        
+        # Lấy chi tiết để tìm S3 URI
+        details = sm_client.describe_model_package(ModelPackageName=pkg_arn)
+        s3_uri = details['InferenceSpecification']['Containers'][0]['ModelDataUrl']
+        
+        logger.info(f"🔎 Tìm thấy model Approved mới nhất: {pkg_arn}")
+        return s3_uri
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Không thể lấy model cũ từ Registry: {e}")
+        return None
+
+def download_from_s3(s3_uri, local_path, region):
+    """Tải file từ S3 về local."""
+    try:
+        s3 = boto3.client('s3', region_name=region)
+        parts = s3_uri.replace("s3://", "").split("/", 1)
+        bucket, key = parts[0], parts[1]
+        
+        logger.info(f"⬇️ Downloading {s3_uri}...")
+        s3.download_file(bucket, key, local_path)
+        return True
+    except Exception as e:
+        logger.error(f"❌ Lỗi download S3: {e}")
+        return False
+
 def preprocess_test_csv(df, scaler_car, scaler_hour):
+    """Tiền xử lý dữ liệu test giống như lúc training."""
     try:
         # 1. Parse Timestamp
         if 'timestamp' in df.columns:
-            # File CSV thường lưu DD/MM/YYYY hoặc ISO. Thử dayfirst=True trước.
             df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True, errors='coerce')
             df = df.dropna(subset=['timestamp'])
             df = df.set_index('timestamp').sort_index()
@@ -51,7 +97,6 @@ def preprocess_test_csv(df, scaler_car, scaler_hour):
         df_resampled['hour'] = df_resampled.index.hour
         
         # 3. Scaling 
-        # Ép kiểu float để tránh lỗi
         df_resampled['car_count'] = df_resampled['car_count'].astype(float)
         df_resampled['hour'] = df_resampled['hour'].astype(float)
 
@@ -59,20 +104,14 @@ def preprocess_test_csv(df, scaler_car, scaler_hour):
         df_resampled['hour_scaled'] = scaler_hour.transform(df_resampled[['hour']])
         
         # 4. Tạo Sequence
-        # Dữ liệu đầu vào cho model: [car_scaled, hour_scaled]
         data_matrix = df_resampled[['car_count_scaled', 'hour_scaled']].values
-        # Dữ liệu gốc để so sánh (Ground Truth)
         raw_car_counts = df_resampled['car_count'].values
         
         X, y_true = [], []
-        
-        # Logic Sliding Window:
-        # Input (X): từ i -> i + n_steps
-        # Output (y): tại i + n_steps + future_step
         limit = len(data_matrix) - N_STEPS - FUTURE_STEP
         
         if limit <= 0:
-            logger.error(f"Dữ liệu test quá ngắn ({len(data_matrix)} dòng). Cần tối thiểu {N_STEPS + FUTURE_STEP} dòng.")
+            logger.error(f"Dữ liệu test quá ngắn. Cần tối thiểu {N_STEPS + FUTURE_STEP} dòng.")
             return None, None
 
         for i in range(limit):
@@ -86,46 +125,48 @@ def preprocess_test_csv(df, scaler_car, scaler_hour):
         return None, None
 
 def evaluate_single_model(model_extract_dir, df_test_raw, model_name="Model"):
-    """
-    Load model + scaler, preprocess test data và đánh giá.
-    """
+    """Load model + scaler, preprocess test data và đánh giá."""
     try:
-        # 1. Load Scalers 
-        scaler_car_path = os.path.join(model_extract_dir, "scaler_car_count.pkl")
-        scaler_hour_path = os.path.join(model_extract_dir, "scaler_hour.pkl")
+        # 1. Load Scalers (Tìm đệ quy)
+        found_scalers = glob.glob(os.path.join(model_extract_dir, "**", "*.pkl"), recursive=True)
+        scaler_car = None
+        scaler_hour = None
         
-        if not os.path.exists(scaler_car_path) or not os.path.exists(scaler_hour_path):
+        for f in found_scalers:
+            if "scaler_car_count" in os.path.basename(f):
+                scaler_car = joblib.load(f)
+            elif "scaler_hour" in os.path.basename(f):
+                scaler_hour = joblib.load(f)
+        
+        if not scaler_car or not scaler_hour:
             logger.error(f"[{model_name}] Thiếu file Scaler (.pkl) trong artifact model!")
             return None
             
-        scaler_car = joblib.load(scaler_car_path)
-        scaler_hour = joblib.load(scaler_hour_path)
-        
-        # 2. Preprocess Data (Tạo X_test, y_test ngay tại đây)
+        # 2. Preprocess Data
         logger.info(f"[{model_name}] Preprocessing test CSV...")
         X_test, y_true = preprocess_test_csv(df_test_raw.copy(), scaler_car, scaler_hour)
         
         if X_test is None: return None
         logger.info(f"[{model_name}] Test Set Size: {len(X_test)} mẫu")
 
-        # 3. Load Keras Model
-        model_path = os.path.join(model_extract_dir, "1")
-        if not os.path.exists(model_path):
-             logger.error(f"[{model_name}] Không tìm thấy thư mục model/1")
-             return None
-             
-        logger.info(f"[{model_name}] Loading model...")
+        # 3. Load Keras Model (Tìm folder chứa saved_model.pb)
+        # Thường là model_dir/1/saved_model.pb hoặc model_dir/saved_model.pb
+        subfolders = [f.path for f in os.scandir(model_extract_dir) if f.is_dir() and f.name.isdigit()]
+        if subfolders:
+            model_path = subfolders[0] # Lấy folder '1'
+        else:
+            model_path = model_extract_dir # Lấy thư mục gốc
+
+        logger.info(f"[{model_name}] Loading model from {model_path}...")
         model = tf.keras.models.load_model(model_path)
 
         # 4. Predict
         logger.info(f"[{model_name}] Predicting...")
         y_pred_scaled = model.predict(X_test, verbose=0)
         
-        # 5. Inverse Transform (Đưa dự đoán về số xe thực tế)
-        # Model output shape (N, 1) -> Inverse bằng scaler_car
+        # 5. Inverse Transform
         y_pred_actual = scaler_car.inverse_transform(y_pred_scaled)
         
-        # Flatten về mảng 1 chiều để so sánh
         y_pred_actual = y_pred_actual.flatten()
         y_true = y_true.flatten()
         
@@ -142,21 +183,23 @@ def evaluate_single_model(model_extract_dir, df_test_raw, model_name="Model"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # Các tham số này được truyền từ build_pipeline.py
+    # Tham số từ Pipeline
     parser.add_argument("--new-model-tar", type=str, default="/opt/ml/processing/new_model/model.tar.gz")
-    parser.add_argument("--old-model-tar", type=str, default="/opt/ml/processing/old_model/model.tar.gz")
     parser.add_argument("--test-data", type=str, default="/opt/ml/processing/test/parking_test.csv")
     parser.add_argument("--output-dir", type=str, default="/opt/ml/processing/output")
+    # Tham số thêm để tự tải model cũ
+    parser.add_argument("--model-package-group-name", type=str, required=False)
+    parser.add_argument("--region", type=str, default="ap-southeast-1")
     
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     # 1. Đọc File CSV Test Gốc
     logger.info(f"📂 Đang đọc file CSV Test từ: {args.test_data}")
     try:
         if os.path.isdir(args.test_data):
-            csv_files = [f for f in os.listdir(args.test_data) if f.endswith('.csv')]
+            csv_files = glob.glob(os.path.join(args.test_data, "*.csv"))
             if csv_files:
-                test_file_path = os.path.join(args.test_data, csv_files[0])
+                test_file_path = csv_files[0]
             else:
                 raise FileNotFoundError("Không tìm thấy file .csv trong thư mục test input")
         else:
@@ -168,26 +211,34 @@ if __name__ == "__main__":
         logger.error(f"❌ Lỗi đọc file Test: {e}")
         exit(1)
 
-    # 2. Đánh giá MODEL MỚI (Candidate)
+    # 2. Đánh giá MODEL MỚI 
     new_model_dir = "/tmp/new_model"
     os.makedirs(new_model_dir, exist_ok=True)
     
     metrics_new = None
     if extract_model_artifact(args.new_model_tar, new_model_dir):
-        # Truyền df_test_raw vào, hàm sẽ tự preprocess bằng scaler CỦA MODEL MỚI
         metrics_new = evaluate_single_model(new_model_dir, df_test_raw, "NEW_MODEL")
     
-    # 3. Đánh giá MODEL CŨ (Production)
+    # 3. Đánh giá MODEL CŨ 
     metrics_old = None
-    old_model_dir = "/tmp/old_model"
-    os.makedirs(old_model_dir, exist_ok=True)
+    os.makedirs(OLD_MODEL_DIR, exist_ok=True)
     
-    if os.path.exists(args.old_model_tar):
-        if extract_model_artifact(args.old_model_tar, old_model_dir):
-            # Truyền df_test_raw vào, hàm sẽ tự preprocess bằng scaler CỦA MODEL CŨ
-            metrics_old = evaluate_single_model(old_model_dir, df_test_raw, "OLD_MODEL")
+    if args.model_package_group_name:
+        sm_client = boto3.client('sagemaker', region_name=args.region)
+        old_model_uri = get_latest_approved_model_artifact(sm_client, args.model_package_group_name)
+        
+        if old_model_uri:
+            local_old_tar = os.path.join(OLD_MODEL_DIR, "model.tar.gz")
+            if download_from_s3(old_model_uri, local_old_tar, args.region):
+                if extract_model_artifact(local_old_tar, OLD_MODEL_DIR):
+                    metrics_old = evaluate_single_model(OLD_MODEL_DIR, df_test_raw, "OLD_MODEL")
+        else:
+            logger.warning("⚠️ Không tìm thấy model Approved nào trong Registry (Lần chạy đầu tiên?).")
     else:
-        logger.warning("⚠️ Không tìm thấy model cũ (Lần chạy đầu tiên?).")
+        logger.warning("⚠️ Không nhận được tham số Model Package Group Name. Bỏ qua so sánh.")
+
+    # Xử lý trường hợp không có metrics cũ
+    if metrics_old is None:
         metrics_old = {"mae": 9999.0, "mse": 9999.0}
 
     # 4. So sánh và Tạo Báo cáo
@@ -205,14 +256,8 @@ if __name__ == "__main__":
     # JSON Report
     report = {
         "regression_metrics": {
-            "mae": {
-                "value": mae_new,
-                "standard_deviation": 0.0
-            },
-            "mse": {
-                "value": metrics_new["mse"] if metrics_new else 9999.0,
-                "standard_deviation": 0.0
-            }
+            "mae": {"value": mae_new, "standard_deviation": 0.0},
+            "mse": {"value": metrics_new["mse"] if metrics_new else 9999.0, "standard_deviation": 0.0}
         },
         "comparison": {
             "new_mae": mae_new,

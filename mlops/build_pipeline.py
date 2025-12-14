@@ -165,6 +165,10 @@ step_evaluate = ProcessingStep(
     outputs=[
         ProcessingOutput(output_name="evaluation", source="/opt/ml/processing/output")
     ],
+    job_arguments=[
+        "--model-package-group-name", model_package_group_name,
+        "--region", region
+    ],
     property_files=[evaluation_report]
 )
 
