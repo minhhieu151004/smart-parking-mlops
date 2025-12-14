@@ -50,7 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=64)
     
     # SageMaker Paths (Tự động mount bởi SageMaker)
-    parser.add_argument('--model-dir', type=str, default=os.environ.get('SM_MODEL_DIR', '/opt/ml/model'))
+    parser.add_argument('--model_dir', type=str, default=os.environ.get('SM_MODEL_DIR', '/opt/ml/model'))
     parser.add_argument('--train', type=str, default=os.environ.get('SM_CHANNEL_TRAIN', '/opt/ml/input/data/train'))
     
     args = parser.parse_args()
