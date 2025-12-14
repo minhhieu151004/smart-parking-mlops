@@ -6,6 +6,8 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.processing import ProcessingInput, ProcessingOutput
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.tensorflow import TensorFlowProcessor, TensorFlow
+from sagemaker.processing import ScriptProcessor 
+from sagemaker import image_uris 
 from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.conditions import ConditionEquals
 from sagemaker.workflow.condition_step import ConditionStep
@@ -26,6 +28,7 @@ sagemaker_session = PipelineSession()
 default_s3_bucket = "kltn-smart-parking-data" 
 role = "arn:aws:iam::120569618597:role/SageMaker-SmartParking-ExecutionRole" 
 model_package_group_name = "SmartParkingModelGroup"
+region = boto3.Session().region_name 
 
 # --- PARAMETERS ---
 input_data_uri = ParameterString(
@@ -119,19 +122,33 @@ step_train = TrainingStep(
 )
 
 # --- STEP 4: EVALUATE MODEL ---
-tf_processor_eval = TensorFlowProcessor(
-    framework_version="2.14.1", role=role,
-    instance_type=processing_instance_type, instance_count=1,
-    base_job_name="evaluate-model", sagemaker_session=sagemaker_session, py_version="py310",
-    
-    command=["python3"] 
+
+# 1. Lấy Image URI của TensorFlow Training 
+tf_eval_image_uri = image_uris.retrieve(
+    framework="tensorflow",
+    region=region,
+    version="2.14.1",
+    py_version="py310",
+    instance_type=processing_instance_type,
+    image_scope="training"
+)
+
+# 2. Dùng ScriptProcessor
+script_eval_processor = ScriptProcessor(
+    image_uri=tf_eval_image_uri,
+    command=["python3"], 
+    role=role,
+    instance_type=processing_instance_type,
+    instance_count=1,
+    base_job_name="evaluate-model",
+    sagemaker_session=sagemaker_session,
 )
 
 evaluation_report = PropertyFile(name="EvaluationReport", output_name="evaluation", path="evaluation.json")
 
 step_evaluate = ProcessingStep(
     name="EvaluateModel",
-    processor=tf_processor_eval, 
+    processor=script_eval_processor, 
     code=os.path.join(BASE_DIR, "evaluate_model.py"), 
     inputs=[
         ProcessingInput(
