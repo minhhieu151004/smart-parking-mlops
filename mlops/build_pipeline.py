@@ -22,28 +22,24 @@ BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 pipeline_name = "SmartParking-Weekly-Retrain-Pipeline"
 sagemaker_session = PipelineSession()
 
-# CẬP NHẬT TÀI NGUYÊN CỦA BẠN
+# Các thông số chung
 default_s3_bucket = "kltn-smart-parking-data" 
 role = "arn:aws:iam::120569618597:role/SageMaker-SmartParking-ExecutionRole" 
 model_package_group_name = "SmartParkingModelGroup"
 
 # --- PARAMETERS ---
-# 1. Master Data (Dữ liệu lịch sử để Retrain)
 input_data_uri = ParameterString(
     name="InputDataUrl", 
     default_value=f"s3://{default_s3_bucket}/parking_data/parking_data.csv"
 )
 
-# 2. Test Data (Dữ liệu kiểm thử)
 test_data_uri = ParameterString(
     name="TestDataUrl", 
     default_value=f"s3://{default_s3_bucket}/parking_data/parking_test.csv"
 )
 
-# 3. Drift Parameters
 mae_threshold = ParameterString(name="MaeThreshold", default_value="10.0") 
 
-# 4. Training Parameters
 training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
@@ -74,10 +70,6 @@ step_check_drift = ProcessingStep(
     ],
     property_files=[drift_property_file]
 )
-
-# ==============================================================================
-# RETRAIN BRANCH (Chỉ chạy khi Drift Detected = True)
-# ==============================================================================
 
 # --- STEP 2: PREPROCESSING ---
 step_preprocess = ProcessingStep(
@@ -110,12 +102,8 @@ tf_estimator = TensorFlow(
         "epochs": training_epochs, 
         "learning-rate": 0.001
     },
-    # Nơi lưu Model Artifacts (model.tar.gz)
     output_path=f"s3://{default_s3_bucket}/pipeline-outputs/training-output", 
-    
-    # Nơi lưu Source Code Pipeline
     code_location=training_code_uri,
-    
     sagemaker_session=sagemaker_session,
 )
 
@@ -134,7 +122,9 @@ step_train = TrainingStep(
 tf_processor_eval = TensorFlowProcessor(
     framework_version="2.14.1", role=role,
     instance_type=processing_instance_type, instance_count=1,
-    base_job_name="evaluate-model", sagemaker_session=sagemaker_session, py_version="py310"
+    base_job_name="evaluate-model", sagemaker_session=sagemaker_session, py_version="py310",
+    
+    command=["python3"] 
 )
 
 evaluation_report = PropertyFile(name="EvaluationReport", output_name="evaluation", path="evaluation.json")
@@ -144,13 +134,11 @@ step_evaluate = ProcessingStep(
     processor=tf_processor_eval, 
     code=os.path.join(BASE_DIR, "evaluate_model.py"), 
     inputs=[
-        # Model mới vừa train xong
         ProcessingInput(
             source=step_train.properties.ModelArtifacts.S3ModelArtifacts, 
             destination="/opt/ml/processing/new_model",
             input_name="new_model_tar"
         ),
-        # Tập Test 
         ProcessingInput(
             source=test_data_uri, 
             destination="/opt/ml/processing/test",
@@ -194,7 +182,6 @@ step_register = ModelStep(
 # LOGIC CONDITION
 # ==============================================================================
 
-# Điều kiện: drift_detected == True 
 cond_drift = ConditionEquals(
     left=JsonGet(
         step_name=step_check_drift.name, 
@@ -207,8 +194,8 @@ cond_drift = ConditionEquals(
 step_cond = ConditionStep(
     name="CheckDriftCondition",
     conditions=[cond_drift],
-    if_steps=[step_preprocess, step_train, step_evaluate, step_register], # Nếu Drift -> Chạy Retrain
-    else_steps=[] # Nếu không Drift -> Dừng
+    if_steps=[step_preprocess, step_train, step_evaluate, step_register], 
+    else_steps=[] 
 )
 
 # --- CREATE PIPELINE ---
