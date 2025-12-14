@@ -49,13 +49,17 @@ if __name__ == '__main__':
     parser.add_argument('--learning-rate', type=float, default=0.001)
     parser.add_argument('--batch-size', type=int, default=64)
     
-    # SageMaker Paths (Tự động mount bởi SageMaker)
-    parser.add_argument('--model_dir', type=str, default=os.environ.get('SM_MODEL_DIR', '/opt/ml/model'))
+    # SageMaker Paths
+    parser.add_argument('--model_dir', type=str) 
     parser.add_argument('--train', type=str, default=os.environ.get('SM_CHANNEL_TRAIN', '/opt/ml/input/data/train'))
     
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
+    # Đảm bảo model_dir được thiết lập đúng
+    args.model_dir = os.environ.get('SM_MODEL_DIR', '/opt/ml/model')
+    
     logging.info("--- BẮT ĐẦU TRAINING (RETRAIN FROM SCRATCH) ---")
+    logging.info(f"📍 Model sẽ được lưu tạm tại local container: {args.model_dir}")
     
     try:
         # 1. LOAD DỮ LIỆU ĐÃ PREPROCESS
@@ -102,7 +106,7 @@ if __name__ == '__main__':
         model.compile(optimizer=Adam(learning_rate=args.learning_rate), loss='mean_squared_error')
         logging.info("✅ Kiến trúc Model đã được khởi tạo.")
 
-        # Checkpoint: Chỉ lưu model có val_loss tốt nhất
+        # Checkpoint: Lưu vào args.model_dir (Lúc này đã là /opt/ml/model)
         checkpoint_path = os.path.join(args.model_dir, 'best_model_checkpoint.h5')
         
         callbacks = [
@@ -120,7 +124,7 @@ if __name__ == '__main__':
             verbose=2
         )
         
-        # 4. LƯU ARTIFACTS (CHO INFERENCE)
+        # 4. LƯU ARTIFACTS
         logging.info(f"💾 Đang lưu model artifacts vào {args.model_dir}...")
 
         # A. Lưu Model Format SavedModel (Standard cho TF Serving/SageMaker)
@@ -128,7 +132,7 @@ if __name__ == '__main__':
         model.save(export_path) 
         logging.info(f"✅ Đã lưu TensorFlow SavedModel vào {export_path}")
         
-        # B. Lưu Metrics Training
+        # B. Lưu Metrics Training (Optional)
         final_train_loss = history.history['loss'][-1]
         final_val_loss = history.history['val_loss'][-1]
         
