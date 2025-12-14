@@ -22,18 +22,19 @@ BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 pipeline_name = "SmartParking-Weekly-Retrain-Pipeline"
 sagemaker_session = PipelineSession()
 
+# CẬP NHẬT TÀI NGUYÊN CỦA BẠN
 default_s3_bucket = "kltn-smart-parking-data" 
 role = "arn:aws:iam::120569618597:role/SageMaker-SmartParking-ExecutionRole" 
 model_package_group_name = "SmartParkingModelGroup"
 
 # --- PARAMETERS ---
-# 1. Master Data for Retraining
+# 1. Master Data (Dữ liệu lịch sử để Retrain)
 input_data_uri = ParameterString(
     name="InputDataUrl", 
     default_value=f"s3://{default_s3_bucket}/parking_data/parking_data.csv"
 )
 
-# 2. Fixed Test Data 
+# 2. Test Data (Dữ liệu kiểm thử)
 test_data_uri = ParameterString(
     name="TestDataUrl", 
     default_value=f"s3://{default_s3_bucket}/parking_data/parking_test.csv"
@@ -75,10 +76,10 @@ step_check_drift = ProcessingStep(
 )
 
 # ==============================================================================
-# RETRAIN BRANCH (Only runs if Drift Detected = True)
+# RETRAIN BRANCH (Chỉ chạy khi Drift Detected = True)
 # ==============================================================================
 
-# --- STEP 2: PREPROCESSING (Take last 70% data) ---
+# --- STEP 2: PREPROCESSING ---
 step_preprocess = ProcessingStep(
     name="PreprocessData",
     processor=sklearn_processor,
@@ -94,7 +95,9 @@ step_preprocess = ProcessingStep(
     ]
 )
 
-# --- STEP 3: TRAIN MODEL (From Scratch) ---
+# --- STEP 3: TRAIN MODEL ---
+training_code_uri = f"s3://{default_s3_bucket}/pipeline-code/training-code"
+
 tf_estimator = TensorFlow(
     entry_point="train_pipeline.py", 
     source_dir=BASE_DIR, 
@@ -107,7 +110,12 @@ tf_estimator = TensorFlow(
         "epochs": training_epochs, 
         "learning-rate": 0.001
     },
+    # Nơi lưu Model Artifacts (model.tar.gz)
     output_path=f"s3://{default_s3_bucket}/pipeline-outputs/training-output", 
+    
+    # Nơi lưu Source Code Pipeline
+    code_location=training_code_uri,
+    
     sagemaker_session=sagemaker_session,
 )
 
@@ -136,11 +144,13 @@ step_evaluate = ProcessingStep(
     processor=tf_processor_eval, 
     code=os.path.join(BASE_DIR, "evaluate_model.py"), 
     inputs=[
+        # Model mới vừa train xong
         ProcessingInput(
             source=step_train.properties.ModelArtifacts.S3ModelArtifacts, 
             destination="/opt/ml/processing/new_model",
             input_name="new_model_tar"
         ),
+        # Tập Test 
         ProcessingInput(
             source=test_data_uri, 
             destination="/opt/ml/processing/test",
@@ -184,7 +194,7 @@ step_register = ModelStep(
 # LOGIC CONDITION
 # ==============================================================================
 
-# Condition: drift_detected == True (Output from drift_detector.py)
+# Điều kiện: drift_detected == True 
 cond_drift = ConditionEquals(
     left=JsonGet(
         step_name=step_check_drift.name, 
@@ -197,8 +207,8 @@ cond_drift = ConditionEquals(
 step_cond = ConditionStep(
     name="CheckDriftCondition",
     conditions=[cond_drift],
-    if_steps=[step_preprocess, step_train, step_evaluate, step_register], # If Drift -> Run Retrain Flow
-    else_steps=[] # If No Drift -> Stop
+    if_steps=[step_preprocess, step_train, step_evaluate, step_register], # Nếu Drift -> Chạy Retrain
+    else_steps=[] # Nếu không Drift -> Dừng
 )
 
 # --- CREATE PIPELINE ---
@@ -216,4 +226,4 @@ pipeline = Pipeline(
 if __name__ == "__main__":
     print(f"Creating/Updating Pipeline: {pipeline_name}")
     pipeline.upsert(role_arn=role)
-    print("✅ Pipeline updated: Drift Check (7 days) -> Retrain Flow.")
+    print("✅ Pipeline updated successfully: Drift Check -> Retrain Logic.")
