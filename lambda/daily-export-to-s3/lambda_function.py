@@ -6,6 +6,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from boto3.dynamodb.conditions import Key
 from io import StringIO
+from decimal import Decimal 
 
 # --- CẤU HÌNH BIẾN MÔI TRƯỜNG ---
 BUCKET_NAME = os.environ.get('S3_BUCKET', 'kltn-smart-parking-data')
@@ -40,56 +41,51 @@ def query_items_by_range(table_name, start_time_str, end_time_str):
         return []
 
 def calculate_and_save_mae(df_raw, df_pred, target_date_str):
-    """
-    Tính toán MAE bằng cách khớp dữ liệu thực tế (Actual) và dự báo (Prediction).
-    """
     try:
         if df_raw.empty or df_pred.empty:
             print("⚠️ Thiếu dữ liệu để tính toán MAE.")
             return
 
-        # 1. Xử lý dữ liệu Actual (Raw)
+        def clean_val(val):
+            if isinstance(val, (tuple, list)):
+                val = val[0]
+            return str(val).strip()
+
+        # 1. XỬ LÝ ACTUAL (RAW)
         df_act = df_raw.copy()
-        # Chuyển đổi timestamp sang Datetime và ép kiểu Index chuẩn
-        df_act['timestamp'] = pd.to_datetime(df_act['timestamp'])
-        df_act = df_act.set_index('timestamp')
-        df_act.index = pd.to_datetime(df_act.index) # ÉP KIỂU DATETIMEINDEX Ở ĐÂY
-        
-        # Chuyển đổi car_count sang kiểu số trước khi resample
-        df_act['car_count'] = pd.to_numeric(df_act['car_count'], errors='coerce')
-        df_act = df_act[['car_count']].resample('5min').mean().dropna()
+        df_act['timestamp'] = pd.to_datetime(df_act['timestamp'].apply(clean_val), errors='coerce')
+        df_act['car_count'] = pd.to_numeric(df_act['car_count'].apply(clean_val), errors='coerce')
+        df_act = df_act.set_index('timestamp')[['car_count']].resample('5min').mean().dropna()
 
-        # 2. Xử lý dữ liệu Prediction
+        # 2. XỬ LÝ PREDICTION
         df_p = df_pred.copy()
-        df_p['prediction_for'] = pd.to_datetime(df_p['prediction_for'])
-        df_p = df_p.rename(columns={'prediction_for': 'timestamp'})
-        df_p = df_p.set_index('timestamp')
-        df_p.index = pd.to_datetime(df_p.index) # ÉP KIỂU DATETIMEINDEX Ở ĐÂY
-        
-        # Chuyển đổi prediction sang kiểu số
-        df_p['prediction'] = pd.to_numeric(df_p['prediction'], errors='coerce')
-        df_p = df_p[['prediction']].resample('5min').mean().dropna()
+        df_p['prediction_for'] = pd.to_datetime(df_p['prediction_for'].apply(clean_val), errors='coerce')
+        df_p['prediction'] = pd.to_numeric(df_p['prediction'].apply(clean_val), errors='coerce')
+        df_p = df_p.set_index('prediction_for')[['prediction']].resample('5min').mean().dropna()
+        df_p.index.name = 'timestamp'
 
-        # 3. Khớp (Inner Join) hai bảng dữ liệu
+        # 3. KHỚP DỮ LIỆU
         df_merged = pd.merge(df_act, df_p, left_index=True, right_index=True, how='inner')
 
         if df_merged.empty:
-            print(f"⚠️ Không tìm thấy mốc thời gian khớp nhau giữa Actual và Pred ngày {target_date_str}")
+            print(f"⚠️ Không khớp được dữ liệu cho ngày {target_date_str}")
             return
 
-        # 4. Tính toán MAE
+        # 4. TÍNH MAE
         df_merged['abs_error'] = (df_merged['car_count'] - df_merged['prediction']).abs()
         mae_val = float(df_merged['abs_error'].mean())
 
-        # 5. Lưu vào DynamoDB
+        # 5. CHUYỂN ĐỔI SANG DECIMAL VÀ LƯU DYNAMODB
+        mae_decimal = Decimal(str(round(mae_val, 4)))
+        
         table_mae = dynamodb.Table(TABLE_MAE_NAME)
         table_mae.put_item(Item={
             'date': target_date_str,
-            'mae': round(mae_val, 4),
-            'samples_count': len(df_merged),
+            'mae': mae_decimal, 
+            'samples_count': int(len(df_merged)),
             'calculated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
-        print(f"✅ MAE Calculated: {mae_val:.4f} (Dựa trên {len(df_merged)} mẫu khớp)")
+        print(f"✅ MAE Calculated & Saved: {mae_decimal} (Mẫu khớp: {len(df_merged)})")
 
     except Exception as e:
         print(f"❌ Lỗi tính MAE chi tiết: {str(e)}")
