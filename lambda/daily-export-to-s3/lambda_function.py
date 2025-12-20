@@ -50,9 +50,13 @@ def calculate_and_save_mae(df_raw, df_pred, target_date_str):
 
         # 1. Xử lý dữ liệu Actual (Raw)
         df_act = df_raw.copy()
+        # Chuyển đổi timestamp sang Datetime và ép kiểu Index chuẩn
         df_act['timestamp'] = pd.to_datetime(df_act['timestamp'])
         df_act = df_act.set_index('timestamp')
-        # Resample về 5 phút để đồng bộ hóa mốc thời gian
+        df_act.index = pd.to_datetime(df_act.index) # ÉP KIỂU DATETIMEINDEX Ở ĐÂY
+        
+        # Chuyển đổi car_count sang kiểu số trước khi resample
+        df_act['car_count'] = pd.to_numeric(df_act['car_count'], errors='coerce')
         df_act = df_act[['car_count']].resample('5min').mean().dropna()
 
         # 2. Xử lý dữ liệu Prediction
@@ -60,6 +64,10 @@ def calculate_and_save_mae(df_raw, df_pred, target_date_str):
         df_p['prediction_for'] = pd.to_datetime(df_p['prediction_for'])
         df_p = df_p.rename(columns={'prediction_for': 'timestamp'})
         df_p = df_p.set_index('timestamp')
+        df_p.index = pd.to_datetime(df_p.index) # ÉP KIỂU DATETIMEINDEX Ở ĐÂY
+        
+        # Chuyển đổi prediction sang kiểu số
+        df_p['prediction'] = pd.to_numeric(df_p['prediction'], errors='coerce')
         df_p = df_p[['prediction']].resample('5min').mean().dropna()
 
         # 3. Khớp (Inner Join) hai bảng dữ liệu
@@ -69,14 +77,14 @@ def calculate_and_save_mae(df_raw, df_pred, target_date_str):
             print(f"⚠️ Không tìm thấy mốc thời gian khớp nhau giữa Actual và Pred ngày {target_date_str}")
             return
 
-        # 4. Tính toán MAE: Mean(|Actual - Prediction|)
+        # 4. Tính toán MAE
         df_merged['abs_error'] = (df_merged['car_count'] - df_merged['prediction']).abs()
         mae_val = float(df_merged['abs_error'].mean())
 
         # 5. Lưu vào DynamoDB
         table_mae = dynamodb.Table(TABLE_MAE_NAME)
         table_mae.put_item(Item={
-            'date': target_date_str,  # Khóa chính (Partition Key)
+            'date': target_date_str,
             'mae': round(mae_val, 4),
             'samples_count': len(df_merged),
             'calculated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -84,7 +92,7 @@ def calculate_and_save_mae(df_raw, df_pred, target_date_str):
         print(f"✅ MAE Calculated: {mae_val:.4f} (Dựa trên {len(df_merged)} mẫu khớp)")
 
     except Exception as e:
-        print(f"❌ Lỗi tính MAE: {str(e)}")
+        print(f"❌ Lỗi tính MAE chi tiết: {str(e)}")
 
 def process_and_save_actuals(df_raw, target_date_str):
     """Lưu Actuals hàng ngày và cập nhật Master File trên S3."""
