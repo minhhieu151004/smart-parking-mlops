@@ -47,7 +47,7 @@ training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 
-# ==============================================================================
+# =============================================================================
 
 # --- STEP 1: CHECK WEEKLY DRIFT ---
 sklearn_processor = SKLearnProcessor(

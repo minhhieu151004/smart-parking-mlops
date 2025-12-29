@@ -64,7 +64,7 @@ def _preprocess_and_scale(df, n_steps=N_STEPS):
     sequence = df_resampled[['car_count_scaled', 'hour_scaled']].values[-n_steps:]
     last_valid_ts = df_resampled.index[-1]
     
-    # 6. Trả về mảng 3D chuẩn
+    # 6. Trả về mảng 3D chuẩn 
     return sequence.reshape(1, n_steps, 2), last_valid_ts
 
 def lambda_handler(event, context):
