@@ -138,7 +138,12 @@ def check_drift(args):
     is_drift_detected = drift_days_count >= limit_days
     
     print(f"--- KẾT QUẢ: {drift_days_count}/7 ngày bị Drift (Ngưỡng kích hoạt: {limit_days}) ---")
-    print(f"--- QUYẾT ĐỊNH: {'🔴 RETRAIN' if is_drift_detected else '🟢 NO RETRAIN'} ---")
+    if is_drift_detected:
+        print("--- QUYẾT ĐỊNH: 🔴 RETRAIN ---")
+        print("ALERT_MONITOR: DRIFT_DETECTED_TRUE") 
+    else:
+        print("--- QUYẾT ĐỊNH: 🟢 NO RETRAIN ---")
+        print("ALERT_MONITOR: DRIFT_DETECTED_FALSE")
 
     # Xuất file kết quả JSON
     result = {

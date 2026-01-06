@@ -154,7 +154,8 @@ def lambda_handler(event, context):
         if comparison_result == "BETTER":
             # === APPROVE & DEPLOY ===
             logger.info("✅ Model MỚI TỐT HƠN -> TIẾN HÀNH DEPLOY.")
-            
+            print(f"DEPLOY_SIGNAL: APPROVED")
+
             sagemaker.update_model_package(
                 ModelPackageArn=model_package_arn,
                 ModelApprovalStatus='Approved',
@@ -168,7 +169,8 @@ def lambda_handler(event, context):
         else:
             # === REJECT ===
             logger.info("❌ Model MỚI TỆ HƠN (HOẶC BẰNG) -> TỪ CHỐI.")
-            
+            print(f"DEPLOY_SIGNAL: REJECTED")
+
             sagemaker.update_model_package(
                 ModelPackageArn=model_package_arn,
                 ModelApprovalStatus='Rejected',
