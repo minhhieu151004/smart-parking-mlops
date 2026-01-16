@@ -78,23 +78,23 @@ if __name__ == '__main__':
         #---------------------------------------------------
         # 2. CHIA DATA TRAIN/VAL
         total_len = len(X_all)
-        # valid_len = int(total_len * 0.2)
-        # valid_start = int(total_len * 0.6)
-        # valid_end = int(total_len * 0.8)
+        valid_len = int(total_len * 0.2)
+        valid_start = int(total_len * 0.6)
+        valid_end = int(total_len * 0.8)
         
-        # X_val = X_all[valid_start : valid_end]
-        # y_val = y_all[valid_start : valid_end]
+        X_val = X_all[valid_start : valid_end]
+        y_val = y_all[valid_start : valid_end]
         
-        # X_train = np.concatenate((X_all[:valid_start], X_all[valid_end:]), axis=0)
-        # y_train = np.concatenate((y_all[:valid_start], y_all[valid_end:]), axis=0)
+        X_train = np.concatenate((X_all[:valid_start], X_all[valid_end:]), axis=0)
+        y_train = np.concatenate((y_all[:valid_start], y_all[valid_end:]), axis=0)
 
-        train_size = int(total_len * 0.8)
+        # train_size = int(total_len * 0.8)
 
-        X_train = X_all[:train_size]
-        y_train = y_all[:train_size]
+        # X_train = X_all[:train_size]
+        # y_train = y_all[:train_size]
         
-        X_val = X_all[train_size:]
-        y_val = y_all[train_size:]
+        # X_val = X_all[train_size:]
+        # y_val = y_all[train_size:]
         #---------------------------------------------------
 
         logging.info(f"   -> Train size: {len(X_train)}")
