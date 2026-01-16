@@ -44,7 +44,7 @@ test_data_uri = ParameterString(
 
 mae_threshold = ParameterString(name="MaeThreshold", default_value="10.0") 
 
-training_epochs = ParameterInteger(name="TrainingEpochs", default_value=60)
+training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 

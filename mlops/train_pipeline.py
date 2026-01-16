@@ -49,7 +49,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # --- Hyperparameters ---
-    parser.add_argument('--epochs', type=int, default=60) #epoch
+    parser.add_argument('--epochs', type=int, default=50) #epoch
     parser.add_argument('--learning-rate', type=float, default=0.005) #learning rate
     parser.add_argument('--batch-size', type=int, default=32) #batch size
     
@@ -87,14 +87,6 @@ if __name__ == '__main__':
         
         X_train = np.concatenate((X_all[:valid_start], X_all[valid_end:]), axis=0)
         y_train = np.concatenate((y_all[:valid_start], y_all[valid_end:]), axis=0)
-
-        # train_size = int(total_len * 0.8)
-
-        # X_train = X_all[:train_size]
-        # y_train = y_all[:train_size]
-        
-        # X_val = X_all[train_size:]
-        # y_val = y_all[train_size:]
         #---------------------------------------------------
 
         logging.info(f"   -> Train size: {len(X_train)}")
@@ -119,7 +111,7 @@ if __name__ == '__main__':
         
         callbacks = [
             ModelCheckpoint(checkpoint_path, monitor='val_loss', save_best_only=True, verbose=1),
-            EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1)
+            EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
         ]
 
         logging.info("🚀 Bắt đầu quá trình Fit...")
