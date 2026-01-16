@@ -16,7 +16,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def build_cnn_lstm_optimized(time_steps, rows, cols, channels):
     """
-    Xây dựng kiến trúc mô hình Hybrid (Conv2D + LSTM) xử lý dữ liệu không gian-thời gian.
     Input Shape: (Batch_Size, TimeSteps, Rows, Cols, Channels)
     """
     model = Sequential()
@@ -110,7 +109,7 @@ if __name__ == '__main__':
         
         callbacks = [
             ModelCheckpoint(checkpoint_path, monitor='val_loss', save_best_only=True, verbose=1),
-            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True, verbose=1)
+            EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1)
         ]
 
         logging.info("🚀 Bắt đầu quá trình Fit...")
