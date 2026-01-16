@@ -3,51 +3,56 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Conv1D, MaxPooling1D, Reshape, BatchNormalization
+from tensorflow.keras.layers import Dense, LSTM, Flatten, Dropout, TimeDistributed, Conv2D, MaxPooling2D
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import logging
-import shutil  
+import shutil
 import sys
-import glob  
+import glob
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def build_model(input_shape):
-    """Xây dựng kiến trúc mô hình Hybrid (CNN-LSTM)."""
-    model = Sequential([
-        # --- CNN Block ---
-        Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=input_shape, padding='same'),
-        BatchNormalization(),
-        MaxPooling1D(pool_size=2),
-        
-        Conv1D(filters=128, kernel_size=3, activation='relu', padding='same'),
-        BatchNormalization(),
-        MaxPooling1D(pool_size=2),
-        
-        # Reshape
-        Reshape((-1, 128)),
-        
-        # --- LSTM Block ---
-        LSTM(units=150, return_sequences=True),
-        Dropout(0.3),
-        LSTM(units=100),
-        Dropout(0.3),
-        
-        # --- Output Layer ---
-        Dense(units=50, activation='relu'),
-        Dense(units=1, activation='sigmoid')
-    ])
+def build_cnn_lstm_optimized(time_steps, rows, cols, channels):
+    """
+    Xây dựng kiến trúc mô hình Hybrid (Conv2D + LSTM) xử lý dữ liệu không gian-thời gian.
+    Input Shape: (Batch_Size, TimeSteps, Rows, Cols, Channels)
+    """
+    model = Sequential()
+    
+    # --- KHỐI CNN  ---
+    # Lớp 1
+    model.add(TimeDistributed(Conv2D(16, (3, 3), activation='relu', padding='same'),
+                              input_shape=(time_steps, rows, cols, channels)))
+    model.add(TimeDistributed(MaxPooling2D((2, 2))))
+    
+    # Lớp 2
+    model.add(TimeDistributed(Conv2D(32, (3, 3), activation='relu', padding='same')))
+    model.add(TimeDistributed(MaxPooling2D((2, 2))))
+    
+    # Flatten
+    model.add(TimeDistributed(Flatten()))
+    
+    # --- KHỐI LSTM ---
+    model.add(LSTM(units=128, return_sequences=True))
+    model.add(Dropout(0.4))
+    
+    model.add(LSTM(64, return_sequences=False))
+    model.add(Dropout(0.4))
+    
+    # --- OUTPUT LAYER ---
+    model.add(Dense(1, activation='sigmoid'))
+    
     return model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # --- Hyperparameters ---
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--learning-rate', type=float, default=0.001)
-    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--epochs', type=int, default=60) #epoch
+    parser.add_argument('--learning-rate', type=float, default=0.005) #learning rate
+    parser.add_argument('--batch-size', type=int, default=32) #batch size
     
     # SageMaker Paths
     parser.add_argument('--model_dir', type=str) 
@@ -73,9 +78,9 @@ if __name__ == '__main__':
         
         # 2. CHIA DATA TRAIN/VAL
         total_len = len(X_all)
-        valid_len = int(total_len * 0.1)
-        valid_start = int(total_len * 0.8)
-        valid_end = int(total_len * 0.9)
+        valid_len = int(total_len * 0.2)
+        valid_start = int(total_len * 0.6)
+        valid_end = int(total_len * 0.8)
         
         X_val = X_all[valid_start : valid_end]
         y_val = y_all[valid_start : valid_end]
@@ -87,15 +92,25 @@ if __name__ == '__main__':
         logging.info(f"   -> Valid size: {len(X_val)}")
 
         # 3. BUILD MODEL & TRAINING
-        input_shape = (X_train.shape[1], X_train.shape[2])
-        model = build_model(input_shape)
-        model.compile(optimizer=Adam(learning_rate=args.learning_rate), loss='mean_squared_error')
+        # X_train shape mong đợi: (Samples, 4, 8, 9, 2)
+        if len(X_train.shape) != 5:
+             raise ValueError(f"❌ Shape dữ liệu không đúng chuẩn 5D: {X_train.shape}. Kiểm tra lại Preprocessing.")
+
+        # Lấy kích thước input động từ dữ liệu
+        _, time_steps, rows, cols, channels = X_train.shape
         
-        checkpoint_path = os.path.join(args.model_dir, 'best_model_checkpoint.h5')
+        logging.info(f"🏗️ Building Model input: ({time_steps}, {rows}, {cols}, {channels})")
+        
+        model = build_cnn_lstm_optimized(time_steps, rows, cols, channels)
+        
+        # Sử dụng MAE loss 
+        model.compile(optimizer=Adam(learning_rate=args.learning_rate), loss='mae')
+        
+        checkpoint_path = os.path.join(args.model_dir, 'best_model.h5') 
         
         callbacks = [
             ModelCheckpoint(checkpoint_path, monitor='val_loss', save_best_only=True, verbose=1),
-            EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True, verbose=1)
         ]
 
         logging.info("🚀 Bắt đầu quá trình Fit...")
@@ -111,7 +126,7 @@ if __name__ == '__main__':
         # 4. LƯU ARTIFACTS
         logging.info(f"💾 Đang lưu model artifacts vào {args.model_dir}...")
 
-        # A. Lưu Model Format SavedModel
+        # A. Lưu Model Format SavedModel 
         export_path = os.path.join(args.model_dir, '1')
         model.save(export_path) 
         logging.info(f"✅ Đã lưu TensorFlow SavedModel vào {export_path}")
@@ -119,7 +134,7 @@ if __name__ == '__main__':
         # ---------------------------------------------------------------------
         logging.info("📥 Đang tìm và copy các file Scaler (.pkl)...")
         
-        # Tìm tất cả file .pkl trong thư mục input data (nơi preprocessing gửi đến)
+        # Tìm file .pkl trong thư mục input data
         scaler_files = glob.glob(os.path.join(args.train, "*.pkl"))
         
         if not scaler_files:

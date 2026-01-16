@@ -25,12 +25,11 @@ def get_evaluation_report(model_package_arn):
         # 1. Lấy thông tin Model Package
         package_desc = sagemaker.describe_model_package(ModelPackageName=model_package_arn)
         
-        # Debug: In ra cấu trúc ModelMetrics để kiểm tra nếu lỗi
+        # In ra cấu trúc ModelMetrics để kiểm tra nếu lỗi
         metrics_data = package_desc.get('ModelMetrics', {})
         logger.info(f"🔍 Raw ModelMetrics: {json.dumps(metrics_data, default=str)}")
 
         # 2. Tìm đường dẫn S3 của file metrics
-        # SageMaker có thể trả về 'ModelQuality' hoặc 'ModelDataQuality' tùy version
         metrics_s3_uri = None
         
         if 'ModelQuality' in metrics_data:

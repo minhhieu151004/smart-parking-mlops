@@ -21,7 +21,8 @@ from sagemaker.workflow.pipeline_context import PipelineSession
 
 # --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
-pipeline_name = "SmartParking-Weekly-Retrain-Pipeline"
+#pipeline_name = "SmartParking-Weekly-Retrain-Pipeline"
+pipeline_name = "SmartParking-Pipeline"
 sagemaker_session = PipelineSession()
 
 # Các thông số chung
@@ -43,7 +44,7 @@ test_data_uri = ParameterString(
 
 mae_threshold = ParameterString(name="MaeThreshold", default_value="10.0") 
 
-training_epochs = ParameterInteger(name="TrainingEpochs", default_value=50)
+training_epochs = ParameterInteger(name="TrainingEpochs", default_value=60)
 processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.t3.medium")
 training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.large")
 
@@ -103,7 +104,7 @@ tf_estimator = TensorFlow(
     py_version="py310",      
     hyperparameters={
         "epochs": training_epochs, 
-        "learning-rate": 0.001
+        "learning-rate": 0.005
     },
     output_path=f"s3://{default_s3_bucket}/pipeline-outputs/training-output", 
     code_location=training_code_uri,
