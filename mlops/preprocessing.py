@@ -70,7 +70,7 @@ if __name__ == "__main__":
         # Resample về 5 phút
         df = df.resample(f'{TIME_STEP_MINUTES}T').mean()
         
-        # Nội suy dữ liệu thiếu (Linear -> Bfill -> Ffill) 
+        # Nội suy dữ liệu thiếu 
         df['car_count'] = df['car_count'].interpolate(method='time') 
         df['car_count'] = df['car_count'].fillna(method='bfill').fillna(method='ffill')
         

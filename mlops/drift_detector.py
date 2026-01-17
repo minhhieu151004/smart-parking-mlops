@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger()
 
 def get_csv_from_s3(s3_client, bucket, key):
-    """Đọc file CSV từ S3, trả về DataFrame rỗng nếu lỗi"""
+    #Đọc file CSV từ S3
     try:
         obj = s3_client.get_object(Bucket=bucket, Key=key)
         return pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
@@ -23,10 +23,7 @@ def get_csv_from_s3(s3_client, bucket, key):
         return pd.DataFrame()
 
 def align_dataframe_by_time(df, value_col, time_col='timestamp'):
-    """
-    Chuẩn hóa DataFrame về index 5 phút (00:00-23:55).
-    """
-    # 1. Tạo index 24 giờ chuẩn (288 điểm)
+    # 1. Tạo index 24 giờ chuẩn
     full_time_index = pd.date_range("00:00", "23:55", freq="5T").time
     
     if df.empty:
@@ -34,7 +31,6 @@ def align_dataframe_by_time(df, value_col, time_col='timestamp'):
         
     # Đảm bảo cột thời gian tồn tại và convert sang datetime
     if time_col in df.columns:
-        # Lưu ý: File CSV hàng ngày của bạn lưu dạng DD/MM/YYYY nên cần dayfirst=True
         df[time_col] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=[time_col])
     else:
@@ -46,22 +42,16 @@ def align_dataframe_by_time(df, value_col, time_col='timestamp'):
     
     # 3. Resample về 5 phút
     try:
-        # Nếu trùng index, lấy trung bình
+        # Nếu trùng, lấy trung bình
         profile_resampled = df[value_col].resample('5T').mean()
     except TypeError:
         df[value_col] = pd.to_numeric(df[value_col], errors='coerce')
         profile_resampled = df[value_col].resample('5T').mean()
     
-    # 4. Nội suy (Interpolate) để lấp lỗ hổng
+    # 4. Nội suy
     profile_interpolated = profile_resampled.interpolate(method='time')
-    
-    # 5. Nhóm theo giờ trong ngày (để chuẩn hóa về 1 ngày duy nhất)
     profile_grouped = profile_interpolated.groupby(profile_interpolated.index.time).mean()
-    
-    # 6. Căn chỉnh theo index chuẩn (00:00 -> 23:55)
     profile_aligned = profile_grouped.reindex(full_time_index)
-    
-    # 7. Lấp đầy lỗ hổng (FFill/BFill)
     profile_final = profile_aligned.ffill().bfill() 
     
     return profile_final
@@ -69,7 +59,7 @@ def align_dataframe_by_time(df, value_col, time_col='timestamp'):
 def check_drift(args):
     s3 = boto3.client('s3')
     
-    # Logic: Check 7 ngày gần nhất tính từ hôm nay
+    # Check 7 ngày gần nhất
     today = datetime.now().date()
     
     drift_days_count = 0
@@ -99,7 +89,6 @@ def check_drift(args):
 
         if not df_act.empty and not df_pred.empty:
             try:
-                # --- ALIGN DATA (QUAN TRỌNG) ---
                 # 1. Actuals: Căn chỉnh theo cột 'timestamp'
                 series_act = align_dataframe_by_time(
                     df_act, 
@@ -114,8 +103,7 @@ def check_drift(args):
                     time_col='prediction_for'
                 )
                 
-                # 3. Tính MAE bằng Sklearn
-                # fillna(0) để đảm bảo không lỗi nếu interpolate thất bại (dù hiếm)
+                # 3. Tính MAE
                 y_true = series_act.fillna(0).values
                 y_pred = series_pred.fillna(0).values
                 

@@ -20,7 +20,7 @@ logger = logging.getLogger()
 N_STEPS = 288           # Input
 TIME_STEP_MINUTES = 5   # Time step
 FUTURE_STEP = 12        # dự đoán 60' sau
-OLD_MODEL_DIR = "/tmp/old_model" # Temporary dir for old model
+OLD_MODEL_DIR = "/tmp/old_model" 
 
 # --- CONFIG  ---
 TIME_STEPS = 4
@@ -88,9 +88,6 @@ def download_from_s3(s3_uri, local_path, region):
         return False
 
 def preprocess_test_csv(df, scaler_car, scaler_hour):
-    """
-    Tiền xử lý dữ liệu
-    """
     try:
         # 1. Parse Timestamp
         if 'timestamp' in df.columns:
@@ -116,7 +113,6 @@ def preprocess_test_csv(df, scaler_car, scaler_hour):
         raw_car_counts = df_resampled['car_count'].values
         
         X, y_true = [], []
-        # Subtract FUTURE_STEP to ensure we have the target label
         limit = len(data_matrix) - N_STEPS - FUTURE_STEP
         
         if limit <= 0:
@@ -130,7 +126,7 @@ def preprocess_test_csv(df, scaler_car, scaler_hour):
         X = np.array(X)          # (Samples, 288, 2)
         y_true = np.array(y_true)
 
-        # 5. --- RESHAPE TO 5D ---
+        # 5. --- RESHAPE ---
         # (Samples, 4, 8, 9, 2)
         try:
             X_reshaped = X.reshape(X.shape[0], TIME_STEPS, ROWS, COLS, 2)
@@ -147,7 +143,7 @@ def preprocess_test_csv(df, scaler_car, scaler_hour):
 def evaluate_single_model(model_extract_dir, df_test_raw, model_name="Model"):
     """Load model + scaler, preprocess test data, and evaluate."""
     try:
-        # 1. Load Scalers (Recursive search)
+        # 1. Load Scalers 
         found_scalers = glob.glob(os.path.join(model_extract_dir, "**", "*.pkl"), recursive=True)
         scaler_car = None
         scaler_hour = None
@@ -213,7 +209,7 @@ if __name__ == "__main__":
     
     args, _ = parser.parse_known_args()
 
-    # 1. Read Original Test CSV
+    # 1. Lấy dữ liệu test
     logger.info(f"📂 Reading Test CSV from: {args.test_data}")
     try:
         if os.path.isdir(args.test_data):
@@ -257,11 +253,10 @@ if __name__ == "__main__":
     else:
         logger.warning("⚠️ Model Package Group Name not provided. Skipping comparison.")
 
-    # Handle case where old metrics are missing
     if metrics_old is None:
         metrics_old = {"mae": 9999.0, "mse": 9999.0}
 
-    # 4. Compare and Create Report
+    # 4. So sánh
     mae_new = metrics_new["mae"] if metrics_new else 9999.0
     mae_old = metrics_old["mae"] if metrics_old else 9999.0
     

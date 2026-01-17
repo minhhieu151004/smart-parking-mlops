@@ -15,9 +15,6 @@ import glob
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def build_cnn_lstm_optimized(time_steps, rows, cols, channels):
-    """
-    Input Shape: (Batch_Size, TimeSteps, Rows, Cols, Channels)
-    """
     model = Sequential()
     
     # --- KHỐI CNN  ---
@@ -93,7 +90,7 @@ if __name__ == '__main__':
         logging.info(f"   -> Valid size: {len(X_val)}")
 
         # 3. BUILD MODEL & TRAINING
-        # X_train shape mong đợi: (Samples, 4, 8, 9, 2)
+        # X_train shape (Samples, 4, 8, 9, 2)
         if len(X_train.shape) != 5:
              raise ValueError(f"❌ Shape dữ liệu không đúng chuẩn 5D: {X_train.shape}. Kiểm tra lại Preprocessing.")
 
