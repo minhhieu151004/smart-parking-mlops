@@ -48,43 +48,46 @@ def _preprocess_and_scale(df, n_steps=N_STEPS):
     
     df = df.dropna(subset=['car_count', 'timestamp'])
     
-    # Kiểm tra độ dài dữ liệu
-    if len(df) < n_steps:
-         raise ValueError(f"Không đủ dữ liệu lịch sử, cần {n_steps} điểm, hiện có {len(df)}.")
-
     # 3. Resample và Interpolate 
     df = df.set_index('timestamp').sort_index()
+    # Resample về 5 phút/lần
     df_resampled = df.resample(f'{TIME_STEP_MINUTES}T').mean().interpolate(method='time')
     
+    # --- Kiểm tra độ dài ---
+    if len(df_resampled) < n_steps:
+         raise ValueError(f"Không đủ dữ liệu sau khi resample. Cần {n_steps} dòng, nhưng chỉ có {len(df_resampled)} dòng.")
+
     # 4. Feature Engineering và SCALING
     df_resampled['hour'] = df_resampled.index.hour
     
     df_resampled['car_count_scaled'] = df_resampled['car_count'] / CAR_MAX
     df_resampled['hour_scaled'] = df_resampled['hour'] / HOUR_MAX
     
-    # 5. Tạo Sequence (Lấy 288 dòng cuối cùng)
-    # Shape lúc này: (288, 2)
+    # 5. Tạo Sequence
     sequence = df_resampled[['car_count_scaled', 'hour_scaled']].values[-n_steps:]
     last_valid_ts = df_resampled.index[-1]
     
     # 6. Trả về mảng 2D raw
     return sequence, last_valid_ts
 
+
 def lambda_handler(event, context):
     try:
-        # --- Nhận dữ liệu từ PI, ghi vào DB ---
+        # --- PHẦN 1: Nhận dữ liệu từ PI, ghi vào DB ---
+        print("📥 Received event body:", event['body'])
         request_data = json.loads(event['body'])
+        
         pi_timestamp_str = request_data['timestamp']
         pi_car_count = request_data['car_count']
         
-        # Lấy danh sách chỗ trống
+        # Lấy danh sách chỗ trống 
         pi_free_spots = request_data.get('free_spots', [])
         
         # Chuyển đổi timestamp sang ISO format 
         pi_timestamp_dt = datetime.strptime(pi_timestamp_str, '%d/%m/%Y %H:%M:%S')
         iso_timestamp = pi_timestamp_dt.isoformat()
         
-        # Tạo Item 
+        # Tạo Item để lưu
         item_to_save = {
             'sensor_id': SENSOR_ID, 
             'timestamp': iso_timestamp, 
@@ -97,33 +100,48 @@ def lambda_handler(event, context):
         print(f"✅ Đã ghi Raw Data: {pi_car_count} xe, Time: {iso_timestamp}")
         
 
-        # --- Lấy dữ liệu lịch sử và gọi SageMaker Endpoint ---
-        # 1. Query lấy 288 dòng dữ liệu gần nhất
+        # --- PHẦN 2: Lấy dữ liệu lịch sử và gọi SageMaker Endpoint ---
+        
+        # 1. Query lấy dữ liệu
+        BUFFER_SIZE = 50 
         response = table_raw.query(
             KeyConditionExpression=Key('sensor_id').eq(SENSOR_ID),
-            Limit=N_STEPS, 
-            ScanIndexForward=False 
+            Limit=N_STEPS + BUFFER_SIZE,  
+            ScanIndexForward=False        
         )
         items = response['Items']
         
+        # Kiểm tra sơ bộ 
         if len(items) < N_STEPS:
             msg = f"COLD START: Đang thu thập dữ liệu ({len(items)}/{N_STEPS})..."
             print(msg)
-            return {'statusCode': 202, 'body': json.dumps({"status": "COLD_START", "message": msg})}
+            return {
+                'statusCode': 202, 
+                'body': json.dumps({"status": "COLD_START", "message": msg})
+            }
 
         items.reverse()
         df = pd.DataFrame(items)
         
         # 2. Tiền xử lý lấy Sequence 2D (288, 2)
-        sequence_2d, last_valid_ts = _preprocess_and_scale(df) 
+        try:
+            sequence_2d, last_valid_ts = _preprocess_and_scale(df) 
+        except ValueError as e:
+            print(f"⚠️ Dữ liệu chưa đủ chuẩn sau khi xử lý: {e}")
+            return {
+                'statusCode': 202, 
+                'body': json.dumps({"status": "NOT_ENOUGH_DATA", "message": str(e)})
+            }
         
-        # 3. RESHAPE CHO MODEL 
-        # (288, 2) -> (1, 4, 8, 9, 2)
+        # 3. RESHAPE CHO MODEL
+        # Input: (288, 2) -> Output: (1, 4, 8, 9, 2)
         try:
             input_tensor = sequence_2d.reshape(1, MODEL_TIME_STEPS, MODEL_ROWS, MODEL_COLS, 2)
             print(f"🔄 Đã reshape input tensor thành công: {input_tensor.shape}")
         except Exception as err:
             print(f"❌ Lỗi Reshape tại Lambda: {err}")
+            # debug shape
+            print(f"Shape thực tế đang có: {sequence_2d.shape}")
             raise err
 
         # 4. Tính Timestamp cho thời điểm dự đoán 
@@ -140,14 +158,22 @@ def lambda_handler(event, context):
             ContentType='application/json', 
             Body=json_payload
         )
+        
+        # Đọc kết quả trả về
         result = json.loads(response['Body'].read().decode())
         
         # 6. Hậu xử lý kết quả
-        scaled_pred_value = result['predictions'][0][0] 
-        actual_pred_value = scaled_pred_value * CAR_MAX
-        final_prediction = int(round(actual_pred_value))
+        if 'predictions' in result:
+             scaled_pred_value = result['predictions'][0][0] 
+        else:
+             # Fallback nếu model trả về trực tiếp
+             scaled_pred_value = result
+             
+        # Inverse Scale
+        actual_pred_value = float(scaled_pred_value) * CAR_MAX
+        final_prediction = int(round(max(0, actual_pred_value))) 
 
-        # 7. Lưu kết quả dự đoán vào bảng Predictions
+        # 7. Lưu kết quả dự đoán
         pred_timestamp_iso = last_valid_ts.isoformat()
         
         table_pred.put_item(
@@ -161,7 +187,7 @@ def lambda_handler(event, context):
         )
         print(f"✅ Dự đoán thành công: {final_prediction} xe (Time: {pred_timestamp_iso})")
         
-        # 8. Trả về phản hồi
+        # 8. Trả về phản hồi cho PI
         return {
             'statusCode': 200,
             'headers': {'Content-Type': 'application/json'},
@@ -174,6 +200,9 @@ def lambda_handler(event, context):
 
     except Exception as e:
         print(f"❌ LỖI SYSTEM: {e}")
+        import traceback
+        traceback.print_exc()
+        
         return {
             'statusCode': 500, 
             'headers': {'Content-Type': 'application/json'}, 
