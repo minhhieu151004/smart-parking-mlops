@@ -137,7 +137,7 @@ def lambda_handler(event, context):
         # Input: (288, 2) -> Output: (1, 4, 8, 9, 2)
         try:
             input_tensor = sequence_2d.reshape(1, MODEL_TIME_STEPS, MODEL_ROWS, MODEL_COLS, 2)
-            print(f"🔄 Đã reshape input tensor thành công: {input_tensor.shape}")
+            print(f"✅ Đã chuẩn bị dữ liệu cho Endpoint")
         except Exception as err:
             print(f"❌ Lỗi Reshape tại Lambda: {err}")
             # debug shape
